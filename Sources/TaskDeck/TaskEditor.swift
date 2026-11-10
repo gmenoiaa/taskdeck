@@ -75,25 +75,9 @@ struct TaskEditor: View {
                 if !isNew {
                     Section("Time — total \(Fmt.short(task.total(now: Date())))") {
                         ForEach(task.entries.sorted { $0.start > $1.start }) { entry in
-                            HStack {
-                                Text(entry.start.formatted(date: .abbreviated, time: .shortened))
-                                Spacer()
-                                if entry.end == nil {
-                                    Text("running").foregroundStyle(Theme.accent)
-                                } else {
-                                    if entry.loggedAt != nil {
-                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                                            .help("Already logged to the tracker")
-                                    }
-                                    Text(Fmt.short(entry.duration(now: Date()))).monospacedDigit()
-                                    Button {
-                                        task.entries.removeAll { $0.id == entry.id }
-                                    } label: { Image(systemName: "trash") }
-                                        .buttonStyle(.borderless)
-                                        .help("Remove this entry")
-                                }
-                            }
-                            .font(.callout)
+                            TimeEntryRow(entry: Binding(get: { entry }, set: { edited in
+                                if let j = task.entries.firstIndex(where: { $0.id == edited.id }) { task.entries[j] = edited }
+                            }), now: Date(), onDelete: { task.entries.removeAll { $0.id == entry.id } })
                         }
                         HStack {
                             TextField("Add time manually", text: $manualMinutes, prompt: Text("minutes"))
@@ -137,12 +121,20 @@ struct TaskEditor: View {
         task.ref = r.ref
         task.url = r.url
         task.title = task.title.trimmingCharacters(in: .whitespaces)
-        // Keep a timer that was started/paused while the editor was open.
-        if let live = store.task(task.id), live.isRunning != task.isRunning || live.entries.count > original.entries.count {
-            let known = Set(original.entries.map(\.id))
-            let removed = known.subtracting(task.entries.map(\.id))
-            let added = task.entries.filter { !known.contains($0.id) }
-            task.entries = live.entries.filter { !removed.contains($0.id) } + added
+        // The timer may have been started or stopped while the editor was open: start from the live
+        // entries and apply only what was changed here (removed, added, start/end edited).
+        if let live = store.task(task.id) {
+            let before = Dictionary(uniqueKeysWithValues: original.entries.map { ($0.id, $0) })
+            let draft = Dictionary(uniqueKeysWithValues: task.entries.map { ($0.id, $0) })
+            let kept = live.entries.compactMap { entry -> TimeEntry? in
+                guard let old = before[entry.id] else { return entry }
+                guard let mine = draft[entry.id] else { return nil }
+                var merged = entry
+                if mine.start != old.start { merged.start = min(mine.start, entry.end ?? Date()) }
+                if entry.end != nil, let end = mine.end, mine.end != old.end { merged.end = max(end, merged.start) }
+                return merged
+            }
+            task.entries = kept + task.entries.filter { before[$0.id] == nil }
         }
         // The tracker status may have been refreshed while the editor was open; a new ticket has none yet.
         task.remoteStatus = linkChanged ? nil : (store.task(task.id)?.remoteStatus ?? task.remoteStatus)

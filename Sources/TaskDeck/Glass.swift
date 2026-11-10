@@ -12,6 +12,8 @@ extension View {
         if #available(macOS 26.0, *) {
             GlassEffectContainer(spacing: 8) { self }
                 .buttonStyle(.glass)
+                // Neutral (gray) glass: the app's red tint would paint every button solid red.
+                .tint(nil)
                 .buttonBorderShape(.capsule)
                 .controlSize(.large)
                 .padding(.horizontal, 16).padding(.bottom, 14).padding(.top, 6)
@@ -26,9 +28,9 @@ extension View {
     @ViewBuilder
     func primaryGlass() -> some View {
         if #available(macOS 26.0, *) {
-            self.buttonStyle(.glassProminent)
+            self.buttonStyle(.glassProminent).tint(Theme.accent)
         } else {
-            self
+            self.buttonStyle(.borderedProminent).tint(Theme.accent)
         }
     }
 

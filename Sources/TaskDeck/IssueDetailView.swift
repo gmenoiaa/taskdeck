@@ -12,6 +12,8 @@ struct IssueDetailView: View {
     @State private var loading = false
     @State private var error: String?
     @State private var entriesError: String?
+    enum Tab { case ticket, comments, time, notes }
+    @State private var tab = Tab.ticket
     @State private var showLog = false
     @State private var copied = false
     @State private var newComment = ""
@@ -35,29 +37,42 @@ struct IssueDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            Picker("View", selection: $tab) {
+                Text("Ticket").tag(Tab.ticket)
+                Text(detail == nil ? "Comments" : "Comments (\(comments.count))").tag(Tab.comments)
+                Text("Time").tag(Tab.time)
+                Text("Notes").tag(Tab.notes)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 16).padding(.bottom, 12)
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    if let error {
+                    if let error, tab == .ticket || tab == .comments {
                         Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
                     }
-                    if let detail {
-                        meta(detail)
-                        if explaining || !explanation.isEmpty || explainError != nil { explanationBox }
-                        notesSection
-                        section("Description") {
-                            let text = detail.description.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if detail.markdown && !text.isEmpty {
-                                MarkdownView(text: text)
-                            } else {
-                                Text(text.isEmpty ? "No description." : text)
-                                    .foregroundStyle(text.isEmpty ? .secondary : .primary)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                    switch tab {
+                    case .ticket:
+                        if let detail {
+                            meta(detail)
+                            if explaining || !explanation.isEmpty || explainError != nil { explanationBox }
+                            section("Description") {
+                                let text = detail.description.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if detail.markdown && !text.isEmpty {
+                                    MarkdownView(text: text)
+                                } else {
+                                    Text(text.isEmpty ? "No description." : text)
+                                        .foregroundStyle(text.isEmpty ? .secondary : .primary)
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
                             }
+                        } else if loading {
+                            loadingView
                         }
-                        if isRedmine { hoursSection(detail) }
-                        section("Comments (\(comments.count))") {
+                    case .comments:
+                        if let detail {
                             composer
                             if comments.isEmpty {
                                 Text("No comments.").foregroundStyle(.secondary)
@@ -79,13 +94,19 @@ struct IssueDetailView: View {
                                 .padding(10)
                                 .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
                             }
+                        } else if loading {
+                            loadingView
                         }
-                    } else if loading {
-                        ProgressView("Loading from \(project?.kind.label ?? "tracker")…")
-                            .frame(maxWidth: .infinity).padding(.top, 60)
+                    case .time:
+                        // Tracked in this app: available even when the ticket cannot be fetched.
+                        timeSection
+                        if isRedmine, let detail { hoursSection(detail) }
+                    case .notes:
+                        notesSection
                     }
                 }
                 .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .softScrollEdges()
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -144,6 +165,11 @@ struct IssueDetailView: View {
         .sheet(isPresented: $showLog, onDismiss: { Task { await load() } }) {
             LogTimeView(taskId: taskId).environment(store)
         }
+    }
+
+    private var loadingView: some View {
+        ProgressView("Loading from \(project?.kind.label ?? "tracker")…")
+            .frame(maxWidth: .infinity).padding(.top, 60)
     }
 
     /// Private notes about the task. They stay on this Mac and are never posted to the tracker.
@@ -210,6 +236,7 @@ struct IssueDetailView: View {
 
     private func explain() async {
         guard let task, let detail else { return }
+        tab = .ticket
         Claude.adoptLegacyKey(from: store.projects)
         guard let key = Claude.apiKey() else {
             explainError = "Set your Claude API key in Settings → AI (⌘,)."
@@ -324,7 +351,7 @@ struct IssueDetailView: View {
     }
 
     private func hoursSection(_ detail: TicketDetail) -> some View {
-        section("Hours") {
+        section("Hours on Redmine") {
             HStack(spacing: 10) {
                 stat("Mine on Redmine", String(format: "%.2f h", myHours))
                 stat("Issue total", detail.totalSpentHours.map { String(format: "%.2f h", $0) } ?? "—")
@@ -352,6 +379,15 @@ struct IssueDetailView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Stretches tracked in this app. Each stop of the timer adds one; each is logged on its own.
+    private var timeSection: some View {
+        section("Time tracked here — \(Fmt.short(task?.total(now: store.now) ?? 0))") {
+            TimeEntriesList(taskId: taskId)
+            Text("Each stop of the timer adds an entry. Change the start time if you forgot to start the timer.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 

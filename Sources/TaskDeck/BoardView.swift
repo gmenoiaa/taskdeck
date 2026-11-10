@@ -10,7 +10,42 @@ struct BoardView: View {
     @State private var showImport = false
     @State private var showArchive = false
 
-    var body: some View {
+private func newTask() {
+        editing = TaskItem(projectId: filter ?? store.projects.first?.id, status: store.defaultColumnId)
+    }
+
+    /// "New task": a red circle of its own, apart from the gray toolbar group.
+    @ToolbarContentBuilder
+    private var newTaskItem: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: newTask) {
+                    // Drawn by hand: a tinted button style in the toolbar comes out oversized and not round.
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .glassEffect(.regular.tint(Theme.accent).interactive(), in: .circle)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("New task")
+                .keyboardShortcut("n", modifiers: .command)
+                .help("New task (⌘N)")
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: newTask) { Label("New task", systemImage: "plus") }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .help("New task (⌘N)")
+                    .buttonStyle(.borderedProminent).tint(Theme.accent)
+            }
+        }
+    }
+
+        var body: some View {
         @Bindable var store = store
         GeometryReader { geo in
             // Columns share the window width; with many columns they keep a readable width and scroll sideways.
@@ -54,21 +89,17 @@ struct BoardView: View {
                 .padding(.horizontal, 8)
             }
             ToolbarItemGroup(placement: .primaryAction) {
-                Menu {
-                    Toggle("Only one timer at a time", isOn: $store.singleTimer)
-                    Button("Pause all timers") { store.stopAll() }
-                        .disabled(store.runningTasks.isEmpty)
-                    Button("Archived tasks…") { showArchive = true }
-                    Button("Refresh ticket statuses") { Task { await store.refreshRemoteStatuses() } }
-                        .disabled(store.refreshingStatuses)
-                    Divider()
-                    SettingsLink { Text("Settings…") }
-                    Button("Show data file in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([AppStore.dataURL])
+                Button { Task { await store.refreshRemoteStatuses() } } label: {
+                    // The spinner takes the icon's place while refreshing, so the button keeps its size.
+                    ZStack {
+                        Image(systemName: "arrow.clockwise").opacity(store.refreshingStatuses ? 0 : 1)
+                        if store.refreshingStatuses { ProgressView().controlSize(.small) }
                     }
-                } label: {
-                    Label("Options", systemImage: "ellipsis.circle")
+                    .accessibilityLabel(store.refreshingStatuses ? "Refreshing statuses" : "Refresh statuses")
                 }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(store.refreshingStatuses)
+                .help("Refresh ticket statuses and assignees from the trackers (⌘R)")
                 Button { showImport = true } label: {
                     Label("Assigned to me", systemImage: "tray.and.arrow.down")
                 }
@@ -79,19 +110,7 @@ struct BoardView: View {
                 }
                 .help("Settings: projects, AI and timers (⌘,)")
             }
-            // On macOS 26+ this puts "New task" in its own glass capsule, apart from the group.
-            if #available(macOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .primaryAction)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    editing = TaskItem(projectId: filter ?? store.projects.first?.id, status: store.defaultColumnId)
-                } label: {
-                    Label("New task", systemImage: "plus")
-                }
-                .keyboardShortcut("n", modifiers: .command)
-                .help("New task (⌘N)")
-            }
+            newTaskItem
         }
         .onChange(of: store.singleTimer) { store.save() }
         .sheet(item: $editing) { task in

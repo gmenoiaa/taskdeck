@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Logs a task's not-yet-logged time to Redmine, one entry per day.
+/// Logs a task's not-yet-logged time to Redmine: one Redmine entry per tracked stretch (each stop of the timer).
 struct LogTimeView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -9,6 +9,8 @@ struct LogTimeView: View {
     struct DayRow: Identifiable {
         let id = UUID()
         var day: Date
+        /// "09:12 – 10:40" for a tracked stretch; empty for hours typed by hand.
+        var span = ""
         var manual = false
         var include = true
         var hours: String
@@ -57,7 +59,7 @@ struct LogTimeView: View {
                     Text("The timer is running — the current stretch is only included after you pause it.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Section("Hours per day") {
+                Section("Entries to log") {
                     if rows.isEmpty {
                         Text("No tracked time pending.").foregroundStyle(.secondary)
                     }
@@ -68,7 +70,12 @@ struct LogTimeView: View {
                                     DatePicker("", selection: $row.day, in: ...Date(), displayedComponents: .date)
                                         .labelsHidden()
                                 } else {
-                                    Text(row.day.formatted(date: .complete, time: .omitted))
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(row.day.formatted(date: .abbreviated, time: .omitted))
+                                        if !row.span.isEmpty {
+                                            Text(row.span).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                                        }
+                                    }
                                 }
                             }
                             .disabled(row.done)
@@ -123,14 +130,13 @@ struct LogTimeView: View {
     private func prepare() async {
         guard let task else { return }
         let cal = Calendar.current
-        let open = task.entries.filter { $0.end != nil && $0.loggedAt == nil }
-        let grouped = Dictionary(grouping: open) { cal.startOfDay(for: $0.start) }
-        rows = grouped.keys.sorted().map { day in
-            let entries = grouped[day] ?? []
-            let seconds = entries.reduce(0) { $0 + $1.duration(now: Date()) }
+        rows = task.entries.filter { $0.end != nil && $0.loggedAt == nil }.sorted { $0.start < $1.start }.map { entry in
             // Never suggest 0.00 for a short stretch.
-            let hours = max(0.01, (seconds / 3600 * 100).rounded() / 100)
-            return DayRow(day: day, hours: String(format: "%.2f", hours), entryIds: Set(entries.map(\.id)))
+            let hours = max(0.01, (entry.duration(now: Date()) / 3600 * 100).rounded() / 100)
+            let span = entry.start.formatted(date: .omitted, time: .shortened) + " – "
+                + (entry.end ?? entry.start).formatted(date: .omitted, time: .shortened)
+            return DayRow(day: cal.startOfDay(for: entry.start), span: span,
+                          hours: String(format: "%.2f", hours), entryIds: [entry.id])
         }
         activityId = project?.defaultActivityId
 
@@ -168,7 +174,7 @@ struct LogTimeView: View {
             do {
                 try await client.logTime(issueId: issueId, hours: hours, day: rows[i].day,
                                          activityId: activityId, comments: comment)
-                // Mark right away: if a later day fails, this one isn't logged twice.
+                // Mark right away: if a later entry fails, this one isn't logged twice.
                 store.markLogged(task: taskId, entries: rows[i].entryIds)
                 rows[i].done = true
                 total += hours

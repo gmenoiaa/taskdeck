@@ -274,6 +274,30 @@ final class AppStore {
         updateDockBadge()
     }
 
+    /// Changes when a stretch started or ended. A running stretch stays running; an entry never ends before it starts.
+    func updateEntry(task id: UUID, _ entry: TimeEntry) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }),
+              let j = tasks[i].entries.firstIndex(where: { $0.id == entry.id }) else { return }
+        let current = tasks[i].entries[j]
+        var updated = current
+        let limit = current.end ?? Date()
+        updated.start = min(entry.start, limit)
+        if current.end != nil, let end = entry.end { updated.end = max(end, updated.start) }
+        guard updated != current else { return }
+        tasks[i].entries[j] = updated
+        now = Date()
+        updateDockBadge()
+        save()
+    }
+
+    func deleteEntry(task id: UUID, entry entryId: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].entries.removeAll { $0.id == entryId }
+        now = Date()
+        updateDockBadge()
+        save()
+    }
+
     func setNotes(_ id: UUID, _ text: String) {
         guard let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].notes != text else { return }
         tasks[i].notes = text
