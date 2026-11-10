@@ -39,7 +39,10 @@ final class AppStore {
     init() {
         load()
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.now = Date() }
+            Task { @MainActor in
+                self?.now = Date()
+                self?.updateDockBadge()
+            }
         }
         RunLoop.main.add(t, forMode: .common)
         ticker = t
@@ -216,6 +219,19 @@ final class AppStore {
 
     var runningTasks: [TaskItem] { tasks.filter(\.isRunning) }
 
+    /// Dock badge while a timer runs: the elapsed time of the single running task, or how many are running.
+    /// Called every second by the ticker and right after a timer starts or stops.
+    private func updateDockBadge() {
+        let running = runningTasks
+        let label: String? = switch running.count {
+        case 0: nil
+        case 1: Fmt.hm(running[0].total(now: now))
+        default: "\(running.count)"
+        }
+        let tile = NSApplication.shared.dockTile
+        if tile.badgeLabel != label { tile.badgeLabel = label }
+    }
+
     private func closeEntries(at i: Int) {
         let end = Date()
         for j in tasks[i].entries.indices where tasks[i].entries[j].end == nil {
@@ -244,6 +260,7 @@ final class AppStore {
             tasks[i].archived = false
         }
         now = Date()
+        updateDockBadge()
         save()
     }
 
@@ -254,6 +271,7 @@ final class AppStore {
             changed = true
         }
         if changed { save() }
+        updateDockBadge()
     }
 
     func setNotes(_ id: UUID, _ text: String) {
