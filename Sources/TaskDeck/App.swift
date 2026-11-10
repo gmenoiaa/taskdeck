@@ -1,0 +1,50 @@
+import SwiftUI
+import AppKit
+
+@main
+struct TaskDeckApp: App {
+    @State private var store = AppStore()
+
+    var body: some Scene {
+        Window("TaskDeck", id: "main") {
+            BoardView()
+                .environment(store)
+                .tint(Theme.accent)
+                .frame(minWidth: 920, minHeight: 520)
+        }
+        .defaultSize(width: 1180, height: 720)
+
+        MenuBarExtra {
+            MenuBarView()
+                .environment(store)
+                .tint(Theme.accent)
+        } label: {
+            MenuBarLabel()
+                .environment(store)
+        }
+        .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView()
+                .environment(store)
+                .tint(Theme.accent)
+        }
+    }
+}
+
+struct MenuBarLabel: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        let running = store.runningTasks
+        HStack(spacing: 4) {
+            Image(systemName: running.isEmpty ? "timer" : "record.circle")
+            if running.count == 1, let task = running.first {
+                Text("\(task.displayRef) \(Fmt.hm(task.total(now: store.now)))".trimmingCharacters(in: .whitespaces))
+                    .monospacedDigit()
+            } else if running.count > 1 {
+                Text("\(running.count) timers")
+            }
+        }
+    }
+}
