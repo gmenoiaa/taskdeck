@@ -315,6 +315,25 @@ final class AppStore {
         save()
     }
 
+    // MARK: Agent sessions
+
+    /// Records a session that Orca just started, and remembers the repository for the task's project.
+    func addSession(_ session: AgentSession, to id: UUID, repoId: String) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].sessions = (tasks[i].sessions ?? []) + [session]
+        if let p = projects.firstIndex(where: { $0.id == tasks[i].projectId }) {
+            projects[p].orcaRepoId = repoId
+        }
+        save()
+    }
+
+    /// Forgets a session here. The worktree and its branch stay in Orca.
+    func removeSession(_ sessionId: UUID, from id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].sessions?.removeAll { $0.id == sessionId }
+        save()
+    }
+
     // MARK: Tracker status
 
     /// Records what the tracker says about a ticket: its status and who it is assigned to.

@@ -319,6 +319,23 @@ struct TaskCard: View {
                         .truncationMode(.tail)
                         .help("Assigned to \(assignee) in \(project?.kind.label ?? "the tracker")")
                 }
+                if let session = task.sessions?.last {
+                    let count = task.sessions?.count ?? 1
+                    Button { Task { await Orca.reveal(session) } } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "terminal").font(.system(size: 9, weight: .bold))
+                            if count > 1 { Text("\(count)").font(.caption.weight(.medium)).monospacedDigit() }
+                        }
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .foregroundStyle(.secondary)
+                        .background(.quaternary, in: Capsule())
+                        .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Agent session “\(session.name)” in \(session.repoName) — click to open it in Orca")
+                }
                 Spacer(minLength: 0)
                 Button {
                     store.toggleTimer(task.id)
@@ -372,6 +389,9 @@ struct TaskCard: View {
             }
             if project?.kind == .redmine {
                 Button("Log time to Redmine…", action: onLog)
+            }
+            if let session = task.sessions?.last {
+                Button("Open session in Orca") { Task { await Orca.reveal(session) } }
             }
             Divider()
             Menu("Move to") {

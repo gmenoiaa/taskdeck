@@ -90,6 +90,8 @@ struct Project: Identifiable, Codable, Hashable {
     var username: String?
     /// Redmine: "textile" (default) or "markdown", matching the instance's setting.
     var textFormat: String?
+    /// Orca repository last used to start a session for this project; preselected next time.
+    var orcaRepoId: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }
@@ -125,6 +127,8 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var remoteAssignee: String?
     /// Last plain-language explanation of the ticket written by Claude (Markdown).
     var explanation: String?
+    /// Agent sessions started in Orca for this task, oldest first. Optional so older files still load.
+    var sessions: [AgentSession]?
     var order: Double = 0
 
     var isRunning: Bool { entries.contains { $0.end == nil } }
