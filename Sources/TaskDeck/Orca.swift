@@ -26,6 +26,8 @@ enum Orca {
         let id: String
         let name: String
         let path: String
+        /// The GitHub organisation or user the repository's remote points at, when Orca knows it.
+        var owner: String?
     }
 
     /// Agents offered in the app. Orca knows more ids; these are the two it manages accounts for.
@@ -67,7 +69,10 @@ enum Orca {
         return rows.compactMap { row in
             guard let id = row["id"] as? String, let path = row["path"] as? String else { return nil }
             let name = (row["displayName"] as? String) ?? URL(fileURLWithPath: path).lastPathComponent
-            return Repo(id: id, name: name, path: path)
+            // "github.com/owner/name", as Orca records the remote.
+            let remote = ((row["gitRemoteIdentity"] as? [String: Any])?["canonicalKey"] as? String ?? "")
+                .split(separator: "/")
+            return Repo(id: id, name: name, path: path, owner: remote.count >= 3 ? String(remote[1]) : nil)
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }

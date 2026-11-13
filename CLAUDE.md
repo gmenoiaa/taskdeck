@@ -39,6 +39,8 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
 - Persistence: `~/Library/Application Support/TaskDeck/data.json` via `AppStore.Snapshot`. Every
   new persisted field is **optional in `Snapshot`** with a default, so old files still load, and
   must be added to both `load()` and `save()`.
+- The user sees "spaces"; in code and in `data.json` a space is still a `Project` (`projects`,
+  `projectId`). Keep the old names in code so existing files load, and write "space" in UI text.
 - Secrets go in the Keychain (service `local.taskdeck`), never in `data.json` or the repository.
 - macOS 26 Liquid Glass (`GlassEffectContainer`, `.buttonStyle(.glass)`, `.glassEffect`,
   `ToolbarSpacer`) is always behind `if #available(macOS 26, *)` with a pre-26 fallback. Shared

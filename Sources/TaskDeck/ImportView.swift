@@ -46,7 +46,7 @@ struct ImportView: View {
                 Spacer()
                 TextField("Filter", text: $search).textFieldStyle(.roundedBorder).frame(width: 160)
                 Picker("", selection: $filter) {
-                    Text("All projects").tag(UUID?.none)
+                    Text("All spaces").tag(UUID?.none)
                     ForEach(store.projects.filter { $0.kind != .other }) { p in
                         Text(p.name).tag(UUID?.some(p.id))
                     }
@@ -88,7 +88,7 @@ struct ImportView: View {
                     }
                 }
                 if sources.isEmpty {
-                    Text("No project with an integration configured.").foregroundStyle(.secondary)
+                    Text("No space with a tracker integration configured.").foregroundStyle(.secondary)
                 }
             }
             .softScrollEdges()

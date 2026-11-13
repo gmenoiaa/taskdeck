@@ -341,6 +341,8 @@ final class AppStore {
         tasks[i].sessions = (tasks[i].sessions ?? []) + [session]
         if let p = projects.firstIndex(where: { $0.id == tasks[i].projectId }) {
             projects[p].orcaRepoId = repoId
+            // A repository used for a space's task belongs to that space from then on.
+            if !projects[p].repoIds.contains(repoId) { projects[p].orcaRepoIds = projects[p].repoIds + [repoId] }
             projects[p].githubAccount = githubAccount.isEmpty ? nil : githubAccount
             if let claudeHome { projects[p].claudeHome = claudeHome.isEmpty ? nil : claudeHome }
         }

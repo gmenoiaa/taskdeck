@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The Projects tab of the Settings window.
+/// The Spaces tab of the Settings window. A space is a `Project` in code and in the data file.
 struct ProjectsView: View {
     @Environment(AppStore.self) private var store
     @State private var editing: Project?
@@ -9,8 +9,8 @@ struct ProjectsView: View {
     var body: some View {
         VStack(spacing: 0) {
             if store.projects.isEmpty {
-                ContentUnavailableView("No projects", systemImage: "folder",
-                                       description: Text("Create a project for each company/tracker."))
+                ContentUnavailableView("No spaces", systemImage: "folder",
+                                       description: Text("Create a space for each company or area of work."))
                     .frame(maxHeight: .infinity)
             } else {
                 List {
@@ -32,11 +32,11 @@ struct ProjectsView: View {
             }
             Divider()
             HStack {
-                Text("One project per company or tracker. Each holds its base URL and credentials.")
+                Text("One space per company or area of work. Each holds its tracker, credentials and agent settings.")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button { editing = Project(colorIndex: store.projects.count) } label: {
-                    Label("New project", systemImage: "plus")
+                    Label("New space", systemImage: "plus")
                 }
             }
             .padding(14)
@@ -45,15 +45,15 @@ struct ProjectsView: View {
             ProjectEditor(project: p).environment(store)
         }
         .confirmationDialog(
-            "Delete project \(deleting?.name ?? "")?",
+            "Delete space \(deleting?.name ?? "")?",
             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })
         ) {
-            Button("Delete project", role: .destructive) {
+            Button("Delete space", role: .destructive) {
                 if let deleting { store.delete(project: deleting) }
                 deleting = nil
             }
         } message: {
-            Text("Tasks are kept, but left without a project.")
+            Text("Tasks are kept, but left without a space.")
         }
     }
 }
@@ -75,7 +75,7 @@ struct ProjectEditor: View {
     var body: some View {
         VStack(spacing: 0) {
             Form {
-                TextField("Name", text: $project.name, prompt: Text("Company / project"))
+                TextField("Name", text: $project.name, prompt: Text("Company or area of work"))
                 Picker("Tracker", selection: $project.kind) {
                     ForEach(TrackerKind.allCases) { Text($0.label).tag($0) }
                 }
@@ -128,11 +128,13 @@ struct ProjectEditor: View {
                 }
                 if Orca.isInstalled {
                     Section("Agent sessions") {
+                        SpaceRepositories(selection: Binding(get: { project.repoIds },
+                                                             set: { project.orcaRepoIds = $0 }))
                         TextField("Claude home", text: Binding(get: { project.claudeHome ?? "" }, set: { project.claudeHome = $0 }),
                                   prompt: Text("~/.claude (default)"))
                         GitHubAccountPicker(selection: Binding(get: { project.githubAccount ?? "" },
                                                                set: { project.githubAccount = $0.isEmpty ? nil : $0 }))
-                        Text("Sessions started in Orca for this project use these: the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
+                        Text("The repositories are offered first when you start a session from one of this space's tasks. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -159,7 +161,7 @@ struct ProjectEditor: View {
         }
         .frame(width: 480)
         // Room for the "Agent sessions" section when it is shown.
-        .frame(minHeight: (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 150 : 0))
+        .frame(minHeight: (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 330 : 0))
         .onAppear {
             apiKey = Keychain.get(account: project.keychainAccount) ?? ""
         }

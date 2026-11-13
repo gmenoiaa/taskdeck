@@ -250,7 +250,7 @@ struct PendingTimeView: View {
             guard !selected(group).isEmpty else { continue }
             guard let task = store.task(group.id), let issueId = Int(task.ref),
                   let project = store.project(group.projectId), let client = RedmineClient(project: project) else {
-                groups[g].error = "Set the project's base URL and API key in Settings → Projects."
+                groups[g].error = "Set the space's base URL and API key in Settings → Spaces."
                 failures += 1
                 continue
             }

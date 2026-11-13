@@ -25,7 +25,7 @@ enum LogComment {
                         onPartial: (String) -> Void = { _ in }) async throws -> Proposal {
         guard let key = Claude.apiKey() else { throw MissingKey() }
         guard let id = Int(task.ref), let client = RedmineClient(project: project) else {
-            throw RedmineError(message: "Set the project's base URL and API key in Settings → Projects.")
+            throw RedmineError(message: "Set the space's base URL and API key in Settings → Spaces.")
         }
         let issue = try await client.issue(id: id)
         let cal = Calendar.current
