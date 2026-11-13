@@ -15,6 +15,7 @@ struct IssueDetailView: View {
     enum Tab { case ticket, comments, time, notes }
     @State private var tab = Tab.ticket
     @State private var showLog = false
+    @State private var showSession = false
     @State private var copied = false
     @State private var newComment = ""
     @State private var posting = false
@@ -54,6 +55,10 @@ struct IssueDetailView: View {
                     }
                     switch tab {
                     case .ticket:
+                        // Shown even when the ticket cannot be fetched: the sessions are saved here.
+                        if !(task?.sessions ?? []).isEmpty {
+                            section("Agent sessions") { SessionsList(taskId: taskId) }
+                        }
                         if let detail {
                             meta(detail)
                             if explaining || !explanation.isEmpty || explainError != nil { explanationBox }
@@ -146,6 +151,14 @@ struct IssueDetailView: View {
                 }
                 .disabled(explaining || detail == nil)
                 .help("Ask Claude to explain this ticket in simple words (ASD-STE100 style)")
+                if Orca.isInstalled {
+                    Button { showSession = true } label: {
+                        Label("Start session", systemImage: "terminal")
+                    }
+                    // Wait for the ticket so the agent gets its full text, not only the title.
+                    .disabled(loading)
+                    .help("Start an agent on this ticket in a new Orca worktree")
+                }
                 Spacer()
                 if isRedmine {
                     Button("Log time…") { showLog = true }
@@ -164,6 +177,9 @@ struct IssueDetailView: View {
         }
         .sheet(isPresented: $showLog, onDismiss: { Task { await load() } }) {
             LogTimeView(taskId: taskId).environment(store)
+        }
+        .sheet(isPresented: $showSession) {
+            StartSessionView(taskId: taskId, detail: detail).environment(store)
         }
     }
 

@@ -21,6 +21,10 @@ final class AppStore {
     @ObservationIgnored private var statusLoop: Task<Void, Never>?
     var refreshingStatuses = false
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    /// Live status of Orca worktrees by id; nil until Orca answered, or when it cannot be reached.
+    var sessionStatuses: [String: Orca.Status]?
+    @ObservationIgnored private var sessionLoop: Task<Void, Never>?
+    @ObservationIgnored private var refreshingSessions = false
 
     private struct Snapshot: Codable {
         var projects: [Project]
@@ -57,6 +61,18 @@ final class AppStore {
                 try? await Task.sleep(for: .seconds(15 * 60))
             }
         }
+
+        // Agent sessions change by the minute. Only while the app is in front: nobody sees the cards otherwise.
+        sessionLoop = Task { [weak self] in
+            while !Task.isCancelled {
+                if NSApplication.shared.isActive { await self?.refreshSessionStatuses() }
+                try? await Task.sleep(for: .seconds(10))
+            }
+        }
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.refreshSessionStatuses() }
+            })
 
         // Don't let timers keep counting while the Mac sleeps or the app is closed.
         let pause: @Sendable (Notification) -> Void = { [weak self] _ in
@@ -312,6 +328,56 @@ final class AppStore {
     func setExplanation(_ id: UUID, _ text: String?) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].explanation = text
+        save()
+    }
+
+    // MARK: Agent sessions
+
+    /// Records a session that Orca just started, and remembers the repository for the task's project.
+    /// `claudeHome` is remembered too when the session ran Claude (nil leaves the project's value alone).
+    func addSession(_ session: AgentSession, to id: UUID, repoId: String, claudeHome: String? = nil,
+                    githubAccount: String) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].sessions = (tasks[i].sessions ?? []) + [session]
+        if let p = projects.firstIndex(where: { $0.id == tasks[i].projectId }) {
+            projects[p].orcaRepoId = repoId
+            projects[p].githubAccount = githubAccount.isEmpty ? nil : githubAccount
+            if let claudeHome { projects[p].claudeHome = claudeHome.isEmpty ? nil : claudeHome }
+        }
+        save()
+        Task { await refreshSessionStatuses() }
+    }
+
+    /// Asks Orca about every worktree, but only when some task on the board has a session.
+    func refreshSessionStatuses() async {
+        guard !refreshingSessions, Orca.isInstalled,
+              tasks.contains(where: { !$0.archived && !($0.sessions ?? []).isEmpty }) else { return }
+        refreshingSessions = true
+        defer { refreshingSessions = false }
+        // Orca closed or not answering: show no status rather than a stale one.
+        let fresh = try? await Orca.statuses()
+        if sessionStatuses != fresh { sessionStatuses = fresh }
+    }
+
+    /// The live status of a session; nil when Orca did not answer or the session has no worktree id.
+    func status(of session: AgentSession) -> Orca.Status? {
+        guard let all = sessionStatuses, let id = session.worktreeId else { return nil }
+        return all[id] ?? .gone
+    }
+
+    /// The session a card should show: one that waits for the user first, then one that is working,
+    /// otherwise the newest.
+    func headlineSession(of task: TaskItem) -> AgentSession? {
+        let sessions = task.sessions ?? []
+        return sessions.last { status(of: $0)?.kind == .yourTurn }
+            ?? sessions.last { status(of: $0)?.kind == .working }
+            ?? sessions.last
+    }
+
+    /// Forgets a session here. The worktree and its branch stay in Orca.
+    func removeSession(_ sessionId: UUID, from id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].sessions?.removeAll { $0.id == sessionId }
         save()
     }
 

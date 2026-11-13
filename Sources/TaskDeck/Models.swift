@@ -90,6 +90,13 @@ struct Project: Identifiable, Codable, Hashable {
     var username: String?
     /// Redmine: "textile" (default) or "markdown", matching the instance's setting.
     var textFormat: String?
+    /// Orca repository last used to start a session for this project; preselected next time.
+    var orcaRepoId: String?
+    /// Claude Code's home directory for this project's agent sessions (e.g. "~/.claude-work"), as typed.
+    /// Empty or nil means Claude's own default.
+    var claudeHome: String?
+    /// The `gh` account this project's agent sessions use. Empty or nil means gh's active account.
+    var githubAccount: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }
@@ -125,6 +132,8 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var remoteAssignee: String?
     /// Last plain-language explanation of the ticket written by Claude (Markdown).
     var explanation: String?
+    /// Agent sessions started in Orca for this task, oldest first. Optional so older files still load.
+    var sessions: [AgentSession]?
     var order: Double = 0
 
     var isRunning: Bool { entries.contains { $0.end == nil } }
