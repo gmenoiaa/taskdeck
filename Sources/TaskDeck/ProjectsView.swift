@@ -126,6 +126,14 @@ struct ProjectEditor: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if Orca.isInstalled {
+                    Section("Agent sessions") {
+                        TextField("Claude home", text: Binding(get: { project.claudeHome ?? "" }, set: { project.claudeHome = $0 }),
+                                  prompt: Text("~/.claude (default)"))
+                        Text("The directory Claude Code keeps its settings, MCP servers and logs in. Sessions started in Orca for this project use it.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             .formStyle(.grouped)
             HStack {
@@ -134,6 +142,8 @@ struct ProjectEditor: View {
                 Button("Save") {
                     project.name = project.name.trimmingCharacters(in: .whitespaces)
                     project.baseURL = project.baseURL.trimmingCharacters(in: .whitespaces)
+                    let home = (project.claudeHome ?? "").trimmingCharacters(in: .whitespaces)
+                    project.claudeHome = home.isEmpty ? nil : home
                     if project.kind != .other {
                         Keychain.set(apiKey, account: project.keychainAccount)
                     }
@@ -146,7 +156,8 @@ struct ProjectEditor: View {
             .padding(14)
         }
         .frame(width: 480)
-        .frame(minHeight: project.kind != .other ? 440 : 280)
+        // Room for the "Agent sessions" section when it is shown.
+        .frame(minHeight: (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 110 : 0))
         .onAppear {
             apiKey = Keychain.get(account: project.keychainAccount) ?? ""
         }

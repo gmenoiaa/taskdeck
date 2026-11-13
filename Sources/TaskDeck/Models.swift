@@ -92,6 +92,9 @@ struct Project: Identifiable, Codable, Hashable {
     var textFormat: String?
     /// Orca repository last used to start a session for this project; preselected next time.
     var orcaRepoId: String?
+    /// Claude Code's home directory for this project's agent sessions (e.g. "~/.claude-work"), as typed.
+    /// Empty or nil means Claude's own default.
+    var claudeHome: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }

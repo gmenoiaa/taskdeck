@@ -13,6 +13,7 @@ struct StartSessionView: View {
     @State private var repoId = ""
     @State private var agent = Orca.agents[0].id
     @State private var name = ""
+    @State private var claudeHome = ""
     @State private var prompt = ""
     @State private var loading = true
     @State private var starting = false
@@ -21,8 +22,13 @@ struct StartSessionView: View {
     private var task: TaskItem? { store.task(taskId) }
     private var project: Project? { store.project(task?.projectId) }
     private var repo: Orca.Repo? { repos.first { $0.id == repoId } }
+    private var homeTyped: String { claudeHome.trimmingCharacters(in: .whitespaces) }
+    /// A home that was typed but is not a directory. An empty field is fine: Claude's default.
+    private var homeMissing: Bool {
+        agent == "claude" && !homeTyped.isEmpty && Orca.resolvedHome(homeTyped) == nil
+    }
     private var canStart: Bool {
-        !starting && repo != nil
+        !starting && repo != nil && !homeMissing
             && !name.trimmingCharacters(in: .whitespaces).isEmpty
             && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -46,6 +52,14 @@ struct StartSessionView: View {
                 .disabled(repos.isEmpty)
                 Picker("Agent", selection: $agent) {
                     ForEach(Orca.agents, id: \.id) { Text($0.label).tag($0.id) }
+                }
+                if agent == "claude" {
+                    TextField("Claude home", text: $claudeHome, prompt: Text("~/.claude (default)"))
+                        .help("The directory Claude Code keeps its settings, MCP servers and logs in. Remembered for this project.")
+                    if homeMissing {
+                        Text("“\(homeTyped)” is not a directory on this Mac.")
+                            .font(.caption).foregroundStyle(.red)
+                    }
                 }
                 TextField("Worktree name", text: $name)
                     .help("Orca creates a new checkout with this name. Its branch name is based on it.")
@@ -88,6 +102,7 @@ struct StartSessionView: View {
             name = Orca.worktreeName(ref: task.ref, title: detail?.subject ?? task.title)
             prompt = Orca.prompt(task: task, project: project, detail: detail)
         }
+        claudeHome = project?.claudeHome ?? ""
         defer { loading = false }
         do {
             repos = try await Orca.repos()
@@ -109,12 +124,47 @@ struct StartSessionView: View {
         do {
             let session = try await Orca.start(
                 repo: repo, name: name.trimmingCharacters(in: .whitespaces), agent: agent,
-                prompt: prompt, comment: comment)
-            store.addSession(session, to: taskId, repoId: repo.id)
+                prompt: prompt, comment: comment, claudeHome: homeTyped)
+            // A Codex session says nothing about the project's Claude home, so it is left as it was.
+            store.addSession(session, to: taskId, repoId: repo.id, claudeHome: agent == "claude" ? homeTyped : nil)
             dismiss()
         } catch {
             self.error = "Orca could not start the session: \(error.localizedDescription)"
         }
+    }
+}
+
+/// A small chip for a session: a terminal icon and, when Orca answered, what the session is doing.
+struct SessionBadge: View {
+    let status: Orca.Status?
+    /// How many sessions the task has; shown when there is no status to show instead.
+    let count: Int
+
+    private var color: Color {
+        switch status?.kind {
+        case .working: return .blue
+        // Orange is the app's "needs you" colour, as on the not-logged-time chip.
+        case .yourTurn: return .orange
+        case .prOpen: return .purple
+        case .prMerged: return .green
+        default: return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "terminal").font(.system(size: 9, weight: .bold))
+            if let status {
+                Text(status.label).font(.caption.weight(.medium))
+            } else if count > 1 {
+                Text("\(count)").font(.caption.weight(.medium)).monospacedDigit()
+            }
+        }
+        .lineLimit(1)
+        .fixedSize()
+        .padding(.horizontal, 7).padding(.vertical, 2)
+        .foregroundStyle(color)
+        .background(color.opacity(0.15), in: Capsule())
     }
 }
 
@@ -135,12 +185,23 @@ struct SessionsList: View {
         let sessions = (store.task(taskId)?.sessions ?? []).reversed()
         VStack(spacing: 6) {
             ForEach(Array(sessions)) { session in
+                let status = store.status(of: session)
                 HStack(spacing: 10) {
-                    Image(systemName: "terminal").foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(session.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
-                        Text("\(agentLabel(session.agent)) · \(session.repoName) · \(Self.started.string(from: session.startedAt))")
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(session.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                            SessionBadge(status: status, count: 1)
+                        }
+                        Text("\(agentLabel(session.agent))\(session.claudeHome.map { " (\($0))" } ?? "") · \(session.repoName) · \(Self.started.string(from: session.startedAt))")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        // What the agent last said, so the user can decide without opening Orca.
+                        if let status, status.kind != .working, let message = status.lastMessage, !message.isEmpty {
+                            Text(message).font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(3).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else if let status, status.kind == .working, let tool = status.tool {
+                            Text("Running \(tool)…").font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     Spacer(minLength: 8)
                     Button("Open in Orca") { Task { await Orca.reveal(session) } }
