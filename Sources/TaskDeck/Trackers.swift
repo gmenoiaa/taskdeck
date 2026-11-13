@@ -339,20 +339,22 @@ enum TicketFetcher {
 }
 
 enum RedmineDate {
-    static func pretty(_ iso: String?) -> String {
-        guard let iso, !iso.isEmpty else { return "" }
+    static func date(_ iso: String?) -> Date? {
+        guard let iso, !iso.isEmpty else { return nil }
         let plain = ISO8601DateFormatter()
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        var date = plain.date(from: iso) ?? fractional.date(from: iso)
-        if date == nil {
-            // Jira: 2024-01-02T10:11:12.345+0000
-            let df = DateFormatter()
-            df.locale = Locale(identifier: "en_US_POSIX")
-            df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
-            date = df.date(from: iso)
-        }
-        return date?.formatted(date: .abbreviated, time: .shortened) ?? iso
+        if let date = plain.date(from: iso) ?? fractional.date(from: iso) { return date }
+        // Jira: 2024-01-02T10:11:12.345+0000
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
+        return df.date(from: iso)
+    }
+
+    static func pretty(_ iso: String?) -> String {
+        guard let iso, !iso.isEmpty else { return "" }
+        return date(iso)?.formatted(date: .abbreviated, time: .shortened) ?? iso
     }
 
     static func prettyDay(_ day: String) -> String {

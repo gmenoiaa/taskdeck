@@ -23,6 +23,10 @@ struct LogTimeView: View {
     @State private var activityId: Int?
     @State private var comment = ""
     @State private var busy = false
+    @State private var suggesting = false
+    @State private var suggested = false
+    @State private var suggestionSource = "the ticket"
+    @State private var suggestError: String?
     @State private var message: String?
     @State private var failed = false
 
@@ -65,23 +69,26 @@ struct LogTimeView: View {
                     }
                     ForEach($rows) { $row in
                         HStack {
-                            Toggle(isOn: $row.include) {
-                                if row.manual && !row.done {
-                                    DatePicker("", selection: $row.day, in: ...Date(), displayedComponents: .date)
-                                        .labelsHidden()
-                                } else {
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(row.day.formatted(date: .abbreviated, time: .omitted))
-                                        if !row.span.isEmpty {
-                                            Text(row.span).font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                                        }
+                            if row.done {
+                                // Already sent: nothing left to switch on or off.
+                                rowLabel(row)
+                            } else {
+                                Toggle(isOn: $row.include) {
+                                    if row.manual {
+                                        DatePicker("", selection: $row.day, in: ...Date(), displayedComponents: .date)
+                                            .labelsHidden()
+                                    } else {
+                                        rowLabel(row)
                                     }
                                 }
                             }
-                            .disabled(row.done)
                             Spacer()
                             if row.done {
-                                Label("logged", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                                // Only the icon is green; green text reads badly on the dark form.
+                                HStack(spacing: 5) {
+                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                                    Text("Logged").foregroundStyle(.secondary)
+                                }
                             } else {
                                 TextField("", text: $row.hours)
                                     .labelsHidden()
@@ -104,10 +111,37 @@ struct LogTimeView: View {
                         Text("Redmine default").tag(Int?.none)
                         ForEach(activities) { Text($0.name).tag(Int?.some($0.id)) }
                     }
-                    TextField("Comment", text: $comment, prompt: Text("optional"))
+                    HStack {
+                        TextField("Comment", text: $comment,
+                                  prompt: Text(suggesting ? "Claude is writing a proposal…" : "optional"))
+                            .disabled(suggesting)
+                        Button { Task { await suggest(auto: false) } } label: {
+                            HStack(spacing: 4) {
+                                ZStack {
+                                    Image(systemName: "sparkles").opacity(suggesting ? 0 : 1)
+                                    if suggesting { ProgressView().controlSize(.small) }
+                                }
+                                Text("Generate")
+                            }
+                        }
+                        .controlSize(.small)
+                        .disabled(suggesting)
+                        .help("Ask Claude to propose a comment from the ticket")
+                    }
+                    if let suggestError {
+                        Text(suggestError).font(.caption).foregroundStyle(.red)
+                    } else if suggested {
+                        Text("Proposed by Claude from \(suggestionSource). Check it before you log.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 if let message {
-                    Text(message).font(.callout).foregroundStyle(failed ? .red : .green)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: failed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(failed ? .red : .green)
+                        Text(message).foregroundStyle(failed ? Color.red : Color.primary)
+                    }
+                    .font(.callout)
                 }
             }
             .formStyle(.grouped)
@@ -124,7 +158,19 @@ struct LogTimeView: View {
         }
         .frame(width: 500)
         .frame(minHeight: 420)
-        .task { await prepare() }
+        .task {
+            await prepare()
+            if store.autoLogComment { await suggest(auto: true) }
+        }
+    }
+
+    private func rowLabel(_ row: DayRow) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(row.day.formatted(date: .abbreviated, time: .omitted))
+            if !row.span.isEmpty {
+                Text(row.span).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            }
+        }
     }
 
     private func prepare() async {
@@ -153,6 +199,31 @@ struct LogTimeView: View {
         } catch {
             failed = true
             message = "Could not load activities: \(error.localizedDescription)"
+        }
+    }
+
+    /// Asks Claude for a short comment for the time entry, from the ticket and my earlier log comments.
+    /// Automatic when the sheet opens (only if a Claude key is set and the field is empty); the button replaces the text.
+    private func suggest(auto: Bool) async {
+        guard let task, let project, !suggesting else { return }
+        if auto && !comment.isEmpty { return }
+        Claude.adoptLegacyKey(from: store.projects)
+        if auto && Claude.apiKey() == nil { return }
+        suggesting = true
+        suggestError = nil
+        let previous = comment
+        defer { suggesting = false }
+        do {
+            let proposal = try await LogComment.propose(
+                task: task, project: project, days: Set(pending.map(\.day)),
+                hours: pending.compactMap { parse($0.hours) }.reduce(0, +),
+                model: store.claudeModel, instructions: store.aiInstructions) { comment = $0 }
+            comment = proposal.text
+            suggestionSource = proposal.source
+            suggested = !comment.isEmpty
+        } catch {
+            comment = previous
+            if !auto { suggestError = "Could not get a proposal: \(error.localizedDescription)" }
         }
     }
 

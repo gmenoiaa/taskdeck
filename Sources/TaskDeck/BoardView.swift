@@ -9,6 +9,8 @@ struct BoardView: View {
     @State private var details: TaskItem?
     @State private var showImport = false
     @State private var showArchive = false
+    @State private var showToday = false
+    @State private var showPending = false
 
 private func newTask() {
         editing = TaskItem(projectId: filter ?? store.projects.first?.id, status: store.defaultColumnId)
@@ -80,13 +82,20 @@ private func newTask() {
                 .fixedSize()
             }
             ToolbarItem(placement: .principal) {
-                HStack(spacing: 6) {
-                    Image(systemName: "clock")
-                    Text("Today: \(Fmt.short(store.trackedToday(now: store.now)))")
-                        .monospacedDigit()
+                // With "All projects", a click shows today's time per project.
+                Button { if filter == nil { showToday.toggle() } } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock")
+                        Text("Today: \(Fmt.short(store.trackedToday(now: store.now, project: filter)))")
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
                 }
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 8)
+                .help(filter == nil ? "Show today's time per project" : "Time tracked today on this project")
+                .popover(isPresented: $showToday, arrowEdge: .bottom) {
+                    TodayBreakdown().environment(store)
+                }
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { Task { await store.refreshRemoteStatuses() } } label: {
@@ -100,6 +109,19 @@ private func newTask() {
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(store.refreshingStatuses)
                 .help("Refresh ticket statuses and assignees from the trackers (⌘R)")
+                // Tracked time not on Redmine yet: the amount shows next to the icon.
+                Button { showPending = true } label: {
+                    let pending = store.pendingLogTasks.reduce(0) { $0 + $1.unloggedSeconds }
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.up.circle")
+                        if pending >= 60 {
+                            Text(Fmt.short(pending)).monospacedDigit().foregroundStyle(.orange)
+                        }
+                    }
+                    .accessibilityLabel("Time to push")
+                }
+                .keyboardShortcut("l", modifiers: .command)
+                .help("Time to push: tracked time that is not on Redmine yet (⌘L)")
                 Button { showImport = true } label: {
                     Label("Assigned to me", systemImage: "tray.and.arrow.down")
                 }
@@ -124,6 +146,9 @@ private func newTask() {
         }
         .sheet(isPresented: $showArchive) {
             ArchiveView().environment(store)
+        }
+        .sheet(isPresented: $showPending) {
+            PendingTimeView().environment(store)
         }
         .sheet(isPresented: $showImport) {
             ImportView().environment(store)
@@ -201,20 +226,14 @@ struct TaskCard: View {
     let onLog: () -> Void
     let onDetails: () -> Void
     @State private var hovering = false
+    @State private var confirmDelete = false
 
     var body: some View {
         let project = store.project(task.projectId)
         let running = task.isRunning
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                if let project {
-                    Text(project.name)
-                        .font(.caption2.weight(.semibold))
-                        .lineLimit(1)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(project.color.opacity(0.18), in: Capsule())
-                        .foregroundStyle(project.color)
-                }
+                // The project is shown by the colour strip on the card's left edge.
                 if !task.displayRef.isEmpty {
                     if let url = URL(string: task.url), !task.url.isEmpty {
                         TicketLink(text: task.displayRef, url: url)
@@ -315,12 +334,24 @@ struct TaskCard: View {
             }
         }
         .padding(10)
+        // Running timer: a faint red wash over the card.
+        .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
+            .fill(Theme.accent.opacity(running ? 0.13 : 0)))
         .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(
             RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
-                .strokeBorder(running ? Theme.accent.opacity(0.75) : Color.primary.opacity(0.08),
-                              lineWidth: running ? 1.5 : 1)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         )
+        // A strip in the project's colour down the left edge, cut to the card's rounded corners.
+        .overlay(alignment: .leading) {
+            if let project {
+                Rectangle().fill(project.color).frame(width: 4)
+                    .frame(maxHeight: .infinity)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
+                    .allowsHitTesting(false)
+            }
+        }
         .contentShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
@@ -349,7 +380,59 @@ struct TaskCard: View {
                 }
             }
             Divider()
-            Button("Delete", role: .destructive) { store.delete(task: task.id) }
+            Button("Delete…", role: .destructive) { confirmDelete = true }
+        }
+        .confirmationDialog("Delete “\(task.title.isEmpty ? task.displayRef : task.title)”?", isPresented: $confirmDelete) {
+            Button("Delete task", role: .destructive) {
+                store.delete(task: task.id)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its tracked time is deleted too. This cannot be undone.")
+        }
+    }
+}
+
+/// Popover of the toolbar's "Today" total: time tracked today, per project.
+struct TodayBreakdown: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        let now = store.now
+        let total = store.trackedToday(now: now)
+        let rows = store.projects
+            .map { (project: $0, seconds: store.trackedToday(now: now, project: $0.id)) }
+            .filter { $0.seconds >= 1 }
+            .sorted { $0.seconds > $1.seconds }
+        let other = total - rows.reduce(0) { $0 + $1.seconds }
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Today by project").font(.headline)
+            if total < 1 {
+                Text("No time tracked today.").foregroundStyle(.secondary)
+            }
+            ForEach(rows, id: \.project.id) { row in
+                line(row.project.name, row.seconds, color: row.project.color)
+            }
+            if other >= 1 { line("No project", other, color: .gray) }
+            if total >= 1 {
+                Divider()
+                HStack {
+                    Text("Total").fontWeight(.semibold)
+                    Spacer(minLength: 24)
+                    Text(Fmt.short(total)).monospacedDigit().fontWeight(.semibold)
+                }
+            }
+        }
+        .padding(14)
+        .frame(minWidth: 220)
+    }
+
+    private func line(_ name: String, _ seconds: TimeInterval, color: Color) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text(name)
+            Spacer(minLength: 24)
+            Text(Fmt.short(seconds)).monospacedDigit().foregroundStyle(.secondary)
         }
     }
 }

@@ -12,6 +12,8 @@ final class AppStore {
     /// Claude model used by AI features, and instructions added to every AI request.
     var claudeModel = Claude.defaultModel
     var aiInstructions = ""
+    /// Propose the time-entry comment when a log screen opens, instead of only on "Generate".
+    var autoLogComment = false
     /// Updated every second; views showing running timers read from here.
     var now = Date()
 
@@ -27,6 +29,7 @@ final class AppStore {
         var singleTimer: Bool?
         var claudeModel: String?
         var aiInstructions: String?
+        var autoLogComment: Bool?
     }
 
     static var dataURL: URL {
@@ -79,6 +82,7 @@ final class AppStore {
             singleTimer = snap.singleTimer ?? false
             claudeModel = snap.claudeModel ?? Claude.defaultModel
             aiInstructions = snap.aiInstructions ?? ""
+            autoLogComment = snap.autoLogComment ?? false
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -94,7 +98,7 @@ final class AppStore {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let snap = Snapshot(projects: projects, tasks: tasks, columns: columns, singleTimer: singleTimer,
-                            claudeModel: claudeModel, aiInstructions: aiInstructions)
+                            claudeModel: claudeModel, aiInstructions: aiInstructions, autoLogComment: autoLogComment)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
@@ -219,13 +223,14 @@ final class AppStore {
 
     var runningTasks: [TaskItem] { tasks.filter(\.isRunning) }
 
-    /// Dock badge while a timer runs: the elapsed time of the single running task, or how many are running.
+    /// Dock badge while a timer runs: the time since the single running timer was started, or how many are running.
     /// Called every second by the ticker and right after a timer starts or stops.
     private func updateDockBadge() {
         let running = runningTasks
         let label: String? = switch running.count {
         case 0: nil
-        case 1: Fmt.hm(running[0].total(now: now))
+        // The current stretch only (since the last start), not the task's total.
+        case 1: Fmt.hm(running[0].entries.last { $0.end == nil }?.duration(now: now) ?? 0)
         default: "\(running.count)"
         }
         let tile = NSApplication.shared.dockTile
@@ -343,6 +348,14 @@ final class AppStore {
         }
     }
 
+    /// Redmine tasks with tracked time that was not sent yet, most pending time first.
+    var pendingLogTasks: [TaskItem] {
+        tasks.filter { task in
+            task.unloggedSeconds > 0 && Int(task.ref) != nil && project(task.projectId)?.kind == .redmine
+        }
+        .sorted { $0.unloggedSeconds > $1.unloggedSeconds }
+    }
+
     func markLogged(task id: UUID, entries ids: Set<UUID>) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         let stamp = Date()
@@ -352,10 +365,11 @@ final class AppStore {
         save()
     }
 
-    func trackedToday(now: Date) -> TimeInterval {
+    /// Time tracked today, for every project or only the given one.
+    func trackedToday(now: Date, project: UUID? = nil) -> TimeInterval {
         let dayStart = Calendar.current.startOfDay(for: now)
         var sum: TimeInterval = 0
-        for task in tasks {
+        for task in tasks where project == nil || task.projectId == project {
             for e in task.entries {
                 let end = e.end ?? now
                 let start = max(e.start, dayStart)

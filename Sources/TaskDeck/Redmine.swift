@@ -184,6 +184,15 @@ struct RedmineClient {
         return try JSONDecoder().decode(Wrapper.self, from: data).issue
     }
 
+    /// Id of the API key's owner.
+    func currentUserId() async throws -> Int {
+        struct Wrapper: Decodable {
+            struct User: Decodable { let id: Int }
+            let user: User
+        }
+        return try JSONDecoder().decode(Wrapper.self, from: try await send("/users/current.json")).user.id
+    }
+
     /// Hours logged by the API key's owner on this issue (most recent first).
     func myTimeEntries(issueId: Int) async throws -> [SpentEntry] {
         struct Wrapper: Decodable {

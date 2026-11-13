@@ -10,6 +10,7 @@ struct TaskEditor: View {
     @State private var fetching = false
     @State private var fetchError: String?
     @State private var manualMinutes = ""
+    @State private var confirmDelete = false
 
     init(task: TaskItem) {
         original = task
@@ -91,10 +92,7 @@ struct TaskEditor: View {
 
             HStack {
                 if !isNew {
-                    Button("Delete", role: .destructive) {
-                        store.delete(task: task.id)
-                        dismiss()
-                    }
+                    Button("Delete…", role: .destructive) { confirmDelete = true }
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -106,6 +104,15 @@ struct TaskEditor: View {
             .padding(14)
         }
         .frame(width: 500)
+        .confirmationDialog("Delete “\(original.title.isEmpty ? original.displayRef : original.title)”?", isPresented: $confirmDelete) {
+            Button("Delete task", role: .destructive) {
+                store.delete(task: task.id)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Its tracked time is deleted too. This cannot be undone.")
+        }
         .frame(minHeight: isNew ? 330 : 480)
     }
 

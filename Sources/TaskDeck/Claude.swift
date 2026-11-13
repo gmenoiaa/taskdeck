@@ -183,6 +183,23 @@ enum Claude {
     """
 
     /// The ticket as plain text for the model: every field, the full description and all comments.
+    static let logCommentSystem = """
+        You write the comment of a time entry (work log) that a developer adds to a ticket in an issue tracker.
+        You get the ticket (title, status, description, comments), sometimes the developer's user name and \
+        their earlier log comments on this ticket, and the hours to log.
+
+        Write one short line that says what the work on this ticket was, as the developer would write it.
+        - Very short: 3 to 6 words, maximum 50 characters. A label, not a sentence: no subject, no articles if the language allows.
+        - No quotes, no ticket number, no trailing period, no preamble. Do not restate the ticket title.
+        - Use the same language and style as the earlier log comments. If there are none, use the language of the ticket.
+        - If you get the developer's own comments of the logged day, base the line on them only: they say what was done.
+        - Otherwise base it on the current state of the ticket: the latest comments and the status.
+        - Do not repeat an earlier log comment word for word.
+        - Do not invent details that the ticket does not support. If you know little, stay general \
+        (for example: Checkout error investigation).
+        Reply with the comment text only.
+        """
+
     static func ticketText(task: TaskItem, project: Project?, detail: TicketDetail) -> String {
         var lines: [String] = []
         lines.append("Ticket: \([detail.kindLabel, task.displayRef].compactMap { $0 }.joined(separator: " "))")

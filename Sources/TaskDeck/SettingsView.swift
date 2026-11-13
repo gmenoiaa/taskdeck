@@ -139,6 +139,14 @@ private struct AISettings: View {
                     Text(model.note).font(.caption).foregroundStyle(.secondary)
                 }
             }
+            Section("Time entry comments") {
+                Picker("Propose a comment", selection: $store.autoLogComment) {
+                    Text("When I click Generate").tag(false)
+                    Text("Automatically").tag(true)
+                }
+                Text("Automatically: Claude writes a proposal as soon as a log screen opens, one request per task listed. Either way the Generate button stays next to the comment field.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Instructions for the AI") {
                 TextEditor(text: $store.aiInstructions)
                     .font(.body)
@@ -162,5 +170,6 @@ private struct AISettings: View {
         }
         .onChange(of: store.claudeModel) { store.save() }
         .onChange(of: store.aiInstructions) { store.save() }
+        .onChange(of: store.autoLogComment) { store.save() }
     }
 }
