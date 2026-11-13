@@ -100,6 +100,13 @@ struct Project: Identifiable, Codable, Hashable {
     /// Claude Code's home directory for this project's agent sessions (e.g. "~/.claude-work"), as typed.
     /// Empty or nil means Claude's own default.
     var claudeHome: String?
+    /// The first message for this space's agent sessions, with placeholders such as "{ref}" (see
+    /// `Orca.placeholders`). Empty or nil means the app's standard message.
+    var sessionPrompt: String?
+    /// The browser this space's links open in ("chrome", "edge"); nil for the system default.
+    var browser: String?
+    /// The browser profile's folder ("Default", "Profile 1"); nil for the browser's last used profile.
+    var browserProfile: String?
     /// A GitHub organisation whose Orca repositories all belong to this space, besides the ticked ones.
     var githubOrg: String?
     /// The `gh` account this project's agent sessions use. Empty or nil means gh's active account.
@@ -156,6 +163,15 @@ struct TaskItem: Identifiable, Codable, Hashable {
 
     func total(now: Date) -> TimeInterval {
         entries.reduce(0) { $0 + $1.duration(now: now) }
+    }
+
+    /// The part of this task's time that falls inside a period; a running timer counts up to `now`.
+    func tracked(in period: DateInterval, now: Date) -> TimeInterval {
+        entries.reduce(0) { sum, entry in
+            let start = max(entry.start, period.start)
+            let end = min(entry.end ?? now, period.end)
+            return end > start ? sum + end.timeIntervalSince(start) : sum
+        }
     }
 
     /// Time already stopped and not yet logged to the tracker.

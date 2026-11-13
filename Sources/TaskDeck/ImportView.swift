@@ -127,7 +127,7 @@ struct ImportView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     if let url = URL(string: ticket.url) {
-                        TicketLink(text: ticket.displayRef, url: url).font(.callout.weight(.medium))
+                        TicketLink(text: ticket.displayRef, url: url, space: store.project(ticket.projectId)).font(.callout.weight(.medium))
                     }
                     Text(ticket.title).lineLimit(2)
                 }

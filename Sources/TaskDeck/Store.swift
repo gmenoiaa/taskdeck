@@ -34,6 +34,13 @@ final class AppStore {
     @ObservationIgnored private var sessionLoop: Task<Void, Never>?
     @ObservationIgnored private var refreshingSessions = false
 
+    /// When the user left (sleep, lock or display off) with a timer running; nil while they are here.
+    /// Saved, so a Mac that shut down while asleep still asks on the next launch.
+    @ObservationIgnored private var awaySince: Date?
+    /// What currently keeps the user away. They are back when it is empty.
+    @ObservationIgnored private var awayReasons: Set<String> = []
+    @ObservationIgnored private var askingAboutAway = false
+
     private struct Snapshot: Codable {
         var projects: [Project]
         var tasks: [TaskItem]
@@ -42,6 +49,7 @@ final class AppStore {
         var claudeModel: String?
         var aiInstructions: String?
         var autoLogComment: Bool?
+        var awaySince: Date?
     }
 
     static var dataURL: URL {
@@ -79,17 +87,136 @@ final class AppStore {
         }
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in await self?.refreshSessionStatuses() }
+                Task { @MainActor in
+                    // Using the app proves the user is back, even if a wake or unlock notice never came.
+                    if let self, self.awaySince != nil {
+                        self.awayReasons.removeAll()
+                        self.askAboutAway(until: Date())
+                    }
+                    await self?.refreshSessionStatuses()
+                }
             })
 
-        // Don't let timers keep counting while the Mac sleeps or the app is closed.
-        let pause: @Sendable (Notification) -> Void = { [weak self] _ in
-            MainActor.assumeIsolated { self?.stopAll() }
-        }
-        observers.append(NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main, using: pause))
+        // A closed app cannot count time.
         observers.append(NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: .main, using: pause))
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    // Quitting while away (a restart during sleep): nobody is there to ask, so the
+                    // time away is left out, as it was before the question existed.
+                    if let self, let since = self.awaySince {
+                        self.cutAway(at: since, resumeAt: nil)
+                        self.awaySince = nil
+                    }
+                    self?.stopAll()
+                    self?.save()
+                }
+            })
+
+        // Sleep, a locked screen or a dark display mean the user walked away. Timers keep running;
+        // the user decides what to do with that time when they are back.
+        let workspace = NSWorkspace.shared.notificationCenter
+        let distributed = DistributedNotificationCenter.default()
+        let leaving: [(NotificationCenter, Notification.Name, String)] = [
+            (workspace, NSWorkspace.willSleepNotification, "sleep"),
+            (workspace, NSWorkspace.screensDidSleepNotification, "display"),
+            (distributed, Notification.Name("com.apple.screenIsLocked"), "lock"),
+        ]
+        let returning: [(NotificationCenter, Notification.Name, String)] = [
+            (workspace, NSWorkspace.didWakeNotification, "sleep"),
+            (workspace, NSWorkspace.screensDidWakeNotification, "display"),
+            (distributed, Notification.Name("com.apple.screenIsUnlocked"), "lock"),
+        ]
+        for (center, name, reason) in leaving {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.left(reason) }
+            })
+        }
+        for (center, name, reason) in returning {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.returned(reason) }
+            })
+        }
+        // Left over from a run that ended while the user was away (shutdown during sleep, a crash).
+        if awaySince != nil {
+            Task { @MainActor [weak self] in self?.askAboutAway(until: Date()) }
+        }
+    }
+
+    // MARK: Away
+
+    private func left(_ reason: String) {
+        awayReasons.insert(reason)
+        // The first sign counts: the display goes dark some time before the Mac sleeps.
+        guard awaySince == nil, tasks.contains(where: \.isRunning) else { return }
+        awaySince = Date()
+        save()
+    }
+
+    private func returned(_ reason: String) {
+        awayReasons.remove(reason)
+        // A display that wakes behind a locked screen is not the user being back.
+        guard awayReasons.isEmpty, awaySince != nil else { return }
+        let back = Date()
+        // After the handler, so the alert does not hold up the system's notification.
+        Task { @MainActor [weak self] in self?.askAboutAway(until: back) }
+    }
+
+    /// Asks what to do with the time a timer ran while the user was away.
+    private func askAboutAway(until back: Date) {
+        guard !askingAboutAway, let since = awaySince else { return }
+        let running = tasks.filter { task in task.entries.contains { $0.end == nil && $0.start < since } }
+        let away = back.timeIntervalSince(since)
+        // Nothing to decide: no timer was running through it, or it was a glance away.
+        guard !running.isEmpty, away >= 120 else {
+            awaySince = nil
+            save()
+            return
+        }
+        askingAboutAway = true
+        defer { askingAboutAway = false }
+
+        let clock = since.formatted(date: Calendar.current.isDate(since, inSameDayAs: back) ? .omitted : .abbreviated,
+                                    time: .shortened)
+        let what = running.count == 1
+            ? "The timer on “\("\(running[0].displayRef) \(running[0].title)".trimmingCharacters(in: .whitespaces))”"
+            : "\(running.count) timers"
+        let alert = NSAlert()
+        alert.messageText = "You were away for \(Fmt.short(away))"
+        alert.informativeText = """
+            \(what) kept running since \(clock).
+
+            Pause stops it at \(clock), so the time away is not counted. \
+            Continue from Now also leaves the time away out, and keeps the timer running. \
+            Keep Running counts the time away.
+            """
+        alert.addButton(withTitle: "Pause")
+        alert.addButton(withTitle: "Continue from Now")
+        alert.addButton(withTitle: "Keep Running")
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        let answer = alert.runModal()
+
+        awaySince = nil
+        switch answer {
+        case .alertFirstButtonReturn: cutAway(at: since, resumeAt: nil)
+        case .alertSecondButtonReturn: cutAway(at: since, resumeAt: back)
+        default: break
+        }
+        now = Date()
+        updateDockBadge()
+        save()
+    }
+
+    /// Ends the stretches that ran through the time away at the moment the user left, and optionally
+    /// starts new ones from when they came back.
+    private func cutAway(at since: Date, resumeAt back: Date?) {
+        for i in tasks.indices {
+            var cut = false
+            for j in tasks[i].entries.indices where tasks[i].entries[j].end == nil && tasks[i].entries[j].start < since {
+                tasks[i].entries[j].end = since
+                cut = true
+            }
+            if cut, let back { tasks[i].entries.append(TimeEntry(start: back)) }
+        }
     }
 
     // MARK: Persistence
@@ -107,6 +234,7 @@ final class AppStore {
             claudeModel = snap.claudeModel ?? Claude.defaultModel
             aiInstructions = snap.aiInstructions ?? ""
             autoLogComment = snap.autoLogComment ?? false
+            awaySince = snap.awaySince
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -122,7 +250,8 @@ final class AppStore {
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let snap = Snapshot(projects: projects, tasks: tasks, columns: columns, singleTimer: singleTimer,
-                            claudeModel: claudeModel, aiInstructions: aiInstructions, autoLogComment: autoLogComment)
+                            claudeModel: claudeModel, aiInstructions: aiInstructions, autoLogComment: autoLogComment,
+                            awaySince: awaySince)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
@@ -360,8 +489,17 @@ final class AppStore {
 
     /// Asks Orca about every worktree, but only when a task has a session or a space has repositories
     /// whose worktrees could belong to a task.
-    func refreshSessionStatuses() async {
-        guard !refreshingSessions, Orca.isInstalled else { return }
+    /// `force` is the refresh button: it also asks GitHub again about every session without waiting
+    /// out the five minutes, and reads Orca's repositories again.
+    func refreshSessionStatuses(force: Bool = false) async {
+        guard Orca.isInstalled else { return }
+        if force {
+            // A background refresh may be half-way; let it finish (a few seconds at most) and then run this one.
+            for _ in 0..<50 where refreshingSessions { try? await Task.sleep(for: .milliseconds(100)) }
+            pullRequestAsked.removeAll()
+            orcaReposAt = .distantPast
+        }
+        guard !refreshingSessions else { return }
         let spaces = projects.filter { !$0.repoIds.isEmpty || !($0.githubOrg ?? "").isEmpty }
         guard !spaces.isEmpty || tasks.contains(where: { !$0.archived && !($0.sessions ?? []).isEmpty }) else { return }
         refreshingSessions = true
@@ -378,7 +516,7 @@ final class AppStore {
         }
         link(trees, spaces: spaces)
         publish(trees)
-        if await askGitHub(trees) { publish(trees) }
+        if await askGitHub(trees, limit: force ? 40 : 3) { publish(trees) }
     }
 
     /// Matches worktrees created in Orca to tasks: same space, and the ticket reference in the name or branch.
@@ -411,6 +549,8 @@ final class AppStore {
     /// Turns Orca's answer into the statuses the views read, with GitHub's pull request where Orca has none.
     private func publish(_ trees: [Orca.Worktree]) {
         var fresh: [String: Orca.Status] = [:]
+        let slugs = Dictionary(orcaRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
+                               uniquingKeysWith: { first, _ in first })
         for tree in trees {
             var status = tree.status
             if status.prNumber == nil, let pr = pullRequests[tree.id] {
@@ -419,14 +559,17 @@ final class AppStore {
                     status.kind = pr.state == "open" ? .prOpen : pr.state == "merged" ? .prMerged : .prClosed
                 }
             }
+            if let number = status.prNumber, let slug = slugs[tree.repoId] {
+                status.prURL = URL(string: "https://github.com/\(slug)/pull/\(number)")
+            }
             fresh[tree.id] = status
         }
         if sessionStatuses != fresh { sessionStatuses = fresh }
     }
 
     /// Asks GitHub about sessions for which Orca reports no pull request, as the space's GitHub account.
-    /// A few per refresh and each at most every five minutes. Returns whether anything changed.
-    private func askGitHub(_ trees: [Orca.Worktree]) async -> Bool {
+    /// A few per background refresh and each at most every five minutes. Returns whether anything changed.
+    private func askGitHub(_ trees: [Orca.Worktree], limit: Int) async -> Bool {
         let byId = Dictionary(trees.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let slugs = Dictionary(orcaRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
                                uniquingKeysWith: { first, _ in first })
@@ -444,7 +587,7 @@ final class AppStore {
             }
         }
         var changed = false
-        for item in due.prefix(3) {
+        for item in due.prefix(limit) {
             pullRequestAsked[item.tree.id] = Date()
             // A failed question keeps what was known; only a real answer replaces it.
             guard let answer = await Orca.pullRequest(slug: item.slug, branch: item.tree.branch, account: item.account) else { continue }
@@ -502,6 +645,14 @@ final class AppStore {
     }
 
     /// Re-reads the tracker status of every task on the board, one request at a time.
+    /// The refresh button: sessions and pull requests alongside the tickets, so one click brings
+    /// everything up to date.
+    func refreshEverything() async {
+        async let sessions: Void = refreshSessionStatuses(force: true)
+        await refreshRemoteStatuses()
+        await sessions
+    }
+
     func refreshRemoteStatuses() async {
         guard !refreshingStatuses else { return }
         refreshingStatuses = true
@@ -536,14 +687,14 @@ final class AppStore {
     /// Time tracked today, for every project or only the given one.
     func trackedToday(now: Date, project: UUID? = nil) -> TimeInterval {
         let dayStart = Calendar.current.startOfDay(for: now)
-        var sum: TimeInterval = 0
-        for task in tasks where project == nil || task.projectId == project {
-            for e in task.entries {
-                let end = e.end ?? now
-                let start = max(e.start, dayStart)
-                if end > start { sum += end.timeIntervalSince(start) }
-            }
+        return tracked(in: DateInterval(start: dayStart, end: max(now, dayStart)), now: now, project: project)
+    }
+
+    /// Time tracked inside a period, for every space or only the given one. Archived tasks count:
+    /// the time was still spent.
+    func tracked(in period: DateInterval, now: Date, project: UUID? = nil) -> TimeInterval {
+        tasks.reduce(0) { sum, task in
+            project == nil || task.projectId == project ? sum + task.tracked(in: period, now: now) : sum
         }
-        return sum
     }
 }

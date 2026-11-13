@@ -169,6 +169,11 @@ struct IssueDetailView: View {
             }
         }
         .frame(width: 640, height: 640)
+        // Links inside the ticket text and comments follow the space's browser too.
+        .environment(\.openURL, OpenURLAction { url in
+            Browser.open(url, space: project)
+            return .handled
+        })
         .task {
             explanation = task?.explanation ?? ""
             notes = task?.notes ?? ""

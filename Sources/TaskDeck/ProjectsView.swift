@@ -126,6 +126,33 @@ struct ProjectEditor: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                if Browser.kinds.contains(where: \.isInstalled) {
+                    Section("Links") {
+                        Picker("Open links in", selection: Binding(
+                            get: { project.browser ?? "" },
+                            set: { project.browser = $0.isEmpty ? nil : $0; project.browserProfile = nil })) {
+                            Text("Default browser").tag("")
+                            ForEach(Browser.kinds.filter(\.isInstalled)) { Text($0.name).tag($0.id) }
+                        }
+                        if let kind = Browser.kind(project.browser) {
+                            let profiles = Browser.profiles(of: kind)
+                            let chosen = Binding(get: { project.browserProfile ?? "" },
+                                                 set: { project.browserProfile = $0.isEmpty ? nil : $0 })
+                            if profiles.isEmpty {
+                                // The profile list could not be read; the folder name still works.
+                                TextField("Profile folder", text: chosen, prompt: Text("Default, Profile 1, …"))
+                                    .help("Shown as the last part of “Profile Path” on the browser's version page.")
+                            } else {
+                                Picker("Profile", selection: chosen) {
+                                    Text("Last used").tag("")
+                                    ForEach(profiles) { Text($0.name).tag($0.directory) }
+                                }
+                            }
+                        }
+                        Text("Tickets and pull requests of this space open there.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 if Orca.isInstalled {
                     Section("Agent sessions") {
                         SpaceRepositories(
@@ -139,6 +166,15 @@ struct ProjectEditor: View {
                         Text("The repositories are offered first when you start a session from one of this space's tasks, and their Orca worktrees named after a ticket show on that task. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    Section("First message to the agent") {
+                        TextEditor(text: Binding(get: { project.sessionPrompt ?? "" }, set: { project.sessionPrompt = $0 }))
+                            .font(.callout.monospaced())
+                            .frame(minHeight: 70)
+                        Text("Leave empty for the standard message with the whole ticket. Otherwise write your own, for example “/implement-ticket {ref}”. "
+                             + Orca.placeholders.map { "\($0.name) is \($0.meaning)" }.joined(separator: "; ")
+                             + ". You can still edit the message each time you start a session.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -150,6 +186,8 @@ struct ProjectEditor: View {
                     project.baseURL = project.baseURL.trimmingCharacters(in: .whitespaces)
                     let home = (project.claudeHome ?? "").trimmingCharacters(in: .whitespaces)
                     project.claudeHome = home.isEmpty ? nil : home
+                    let prompt = (project.sessionPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    project.sessionPrompt = prompt.isEmpty ? nil : prompt
                     if project.kind != .other {
                         Keychain.set(apiKey, account: project.keychainAccount)
                     }
@@ -163,7 +201,8 @@ struct ProjectEditor: View {
         }
         .frame(width: 480)
         // Room for the "Agent sessions" section when it is shown.
-        .frame(minHeight: (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 370 : 0))
+        // Capped: with every section showing it would be taller than a laptop screen. The form scrolls.
+        .frame(minHeight: min(720, (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 370 : 0)))
         .onAppear {
             apiKey = Keychain.get(account: project.keychainAccount) ?? ""
         }

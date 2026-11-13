@@ -264,6 +264,8 @@ enum Orca {
         /// The end of the agent's last answer, once it stopped.
         var lastMessage: String?
         var prNumber: Int?
+        /// The pull request's page on GitHub, when the repository's address is known.
+        var prURL: URL?
 
         static let gone = Status(kind: .gone)
 
@@ -380,6 +382,8 @@ enum Orca {
 
     /// The first message to the agent. Private notes are never part of it.
     static func prompt(task: TaskItem, project: Project?, detail: TicketDetail?) -> String {
+        let template = (project?.sessionPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !template.isEmpty { return fill(template, task: task, project: project, detail: detail) }
         var parts = ["""
             Work on the ticket below in this repository. First read the code that the ticket is about, \
             then say what you plan to change before you change it.
@@ -396,6 +400,47 @@ enum Orca {
         }
         if detail != nil, !task.url.isEmpty { parts.append("Ticket link: \(task.url)") }
         return parts.joined(separator: "\n\n")
+    }
+
+    /// What a space's own first message can contain, with what each one becomes.
+    static let placeholders: [(name: String, meaning: String)] = [
+        ("{ref}", "the ticket reference, as in WEBSITE-123 or 12345"),
+        ("{title}", "the ticket's title"),
+        ("{url}", "the ticket's link"),
+        ("{description}", "the ticket's description"),
+        ("{ticket}", "the whole ticket: fields, description and comments"),
+    ]
+
+    /// Replaces the placeholders in one pass, so ticket text that happens to contain "{title}" is
+    /// left as it is. Private notes have no placeholder.
+    private static func fill(_ template: String, task: TaskItem, project: Project?, detail: TicketDetail?) -> String {
+        let ticket: String
+        if let detail {
+            ticket = "<ticket>\n\(Claude.ticketText(task: task, project: project, detail: detail))\n</ticket>"
+        } else {
+            ticket = "<ticket>\nTicket: \(task.displayRef)\nTitle: \(task.title)\n</ticket>"
+        }
+        let values = [
+            "{ref}": task.ref,
+            "{title}": detail?.subject ?? task.title,
+            "{url}": task.url,
+            "{description}": detail?.description ?? "",
+            "{ticket}": ticket,
+        ]
+        var result = ""
+        var rest = Substring(template)
+        while let open = rest.firstIndex(of: "{") {
+            result += rest[..<open]
+            rest = rest[open...]
+            if let match = values.first(where: { rest.hasPrefix($0.key) }) {
+                result += match.value
+                rest = rest.dropFirst(match.key.count)
+            } else {
+                result += "{"
+                rest = rest.dropFirst()
+            }
+        }
+        return result + rest
     }
 
     // MARK: Running the command
