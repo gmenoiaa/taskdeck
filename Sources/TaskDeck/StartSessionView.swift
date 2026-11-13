@@ -14,6 +14,7 @@ struct StartSessionView: View {
     @State private var agent = Orca.agents[0].id
     @State private var name = ""
     @State private var claudeHome = ""
+    @State private var githubAccount = ""
     @State private var prompt = ""
     @State private var loading = true
     @State private var starting = false
@@ -61,6 +62,7 @@ struct StartSessionView: View {
                             .font(.caption).foregroundStyle(.red)
                     }
                 }
+                GitHubAccountPicker(selection: $githubAccount)
                 TextField("Worktree name", text: $name)
                     .help("Orca creates a new checkout with this name. Its branch name is based on it.")
                 Section("First message to the agent") {
@@ -103,6 +105,7 @@ struct StartSessionView: View {
             prompt = Orca.prompt(task: task, project: project, detail: detail)
         }
         claudeHome = project?.claudeHome ?? ""
+        githubAccount = project?.githubAccount ?? ""
         defer { loading = false }
         do {
             repos = try await Orca.repos()
@@ -124,13 +127,34 @@ struct StartSessionView: View {
         do {
             let session = try await Orca.start(
                 repo: repo, name: name.trimmingCharacters(in: .whitespaces), agent: agent,
-                prompt: prompt, comment: comment, claudeHome: homeTyped)
+                prompt: prompt, comment: comment, claudeHome: homeTyped, githubAccount: githubAccount)
             // A Codex session says nothing about the project's Claude home, so it is left as it was.
-            store.addSession(session, to: taskId, repoId: repo.id, claudeHome: agent == "claude" ? homeTyped : nil)
+            store.addSession(session, to: taskId, repoId: repo.id, claudeHome: agent == "claude" ? homeTyped : nil,
+                             githubAccount: githubAccount)
             dismiss()
         } catch {
             self.error = "Orca could not start the session: \(error.localizedDescription)"
         }
+    }
+}
+
+/// Chooses which signed-in `gh` account a project's agent sessions use.
+struct GitHubAccountPicker: View {
+    @Binding var selection: String
+    @State private var accounts: [String] = []
+
+    var body: some View {
+        Picker("GitHub account", selection: $selection) {
+            Text("gh's active account").tag("")
+            ForEach(options, id: \.self) { Text($0).tag($0) }
+        }
+        .help("The account the agent's gh commands run as. Accounts come from “gh auth login”.")
+        .task { accounts = await Orca.githubAccounts() }
+    }
+
+    /// The saved account stays selectable even when gh no longer lists it, so it is not silently dropped.
+    private var options: [String] {
+        selection.isEmpty || accounts.contains(selection) ? accounts : accounts + [selection]
     }
 }
 
@@ -192,7 +216,7 @@ struct SessionsList: View {
                             Text(session.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                             SessionBadge(status: status, count: 1)
                         }
-                        Text("\(agentLabel(session.agent))\(session.claudeHome.map { " (\($0))" } ?? "") · \(session.repoName) · \(Self.started.string(from: session.startedAt))")
+                        Text("\(agentLabel(session.agent))\(session.claudeHome.map { " (\($0))" } ?? "")\(session.githubAccount.map { " · gh \($0)" } ?? "") · \(session.repoName) · \(Self.started.string(from: session.startedAt))")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         // What the agent last said, so the user can decide without opening Orca.
                         if let status, status.kind != .working, let message = status.lastMessage, !message.isEmpty {

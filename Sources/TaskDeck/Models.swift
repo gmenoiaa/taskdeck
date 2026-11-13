@@ -95,6 +95,8 @@ struct Project: Identifiable, Codable, Hashable {
     /// Claude Code's home directory for this project's agent sessions (e.g. "~/.claude-work"), as typed.
     /// Empty or nil means Claude's own default.
     var claudeHome: String?
+    /// The `gh` account this project's agent sessions use. Empty or nil means gh's active account.
+    var githubAccount: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }

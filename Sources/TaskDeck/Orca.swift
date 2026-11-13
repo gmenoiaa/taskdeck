@@ -15,6 +15,8 @@ struct AgentSession: Identifiable, Codable, Hashable {
     var agent: String
     /// The Claude home directory the agent was started with, as typed; nil for the default.
     var claudeHome: String?
+    /// The `gh` account the agent was started with; nil for gh's active account.
+    var githubAccount: String?
     var startedAt = Date()
 }
 
@@ -72,15 +74,17 @@ enum Orca {
 
     /// Creates a new checkout of the repository, starts the agent in it and sends the prompt.
     /// `claudeHome` (Claude only) is the directory Claude Code keeps its settings, MCP servers and logs in.
+    /// `githubAccount` is the `gh` user the agent's `gh` commands run as; empty means gh's active account.
     static func start(repo: Repo, name: String, agent: String, prompt: String, comment: String,
-                      claudeHome: String? = nil) async throws -> AgentSession {
-        let home = claudeHome?.trimmingCharacters(in: .whitespaces) ?? ""
-        let customHome = agent == "claude" && !home.isEmpty
+                      claudeHome: String? = nil, githubAccount: String? = nil) async throws -> AgentSession {
+        let home = agent == "claude" ? (claudeHome?.trimmingCharacters(in: .whitespaces) ?? "") : ""
+        let account = githubAccount?.trimmingCharacters(in: .whitespaces) ?? ""
+        let customLaunch = !home.isEmpty || !account.isEmpty
 
         var args = ["worktree", "create", "--repo", "id:\(repo.id)", "--name", name, "--no-parent"]
-        // Orca's own launcher cannot set environment variables, so with a custom home the worktree
-        // is created without an agent and Claude is started in a terminal below.
-        if !customHome { args += ["--agent", agent, "--prompt", prompt] }
+        // Orca's own launcher cannot set environment variables, so when the session needs any the
+        // worktree is created without an agent and the agent is started in a terminal below.
+        if !customLaunch { args += ["--agent", agent, "--prompt", prompt] }
         if !comment.isEmpty { args += ["--comment", comment] }
         let result = try await run(args)
         // The shape of this result differs between Orca versions, so each value is looked up by key
@@ -92,17 +96,30 @@ enum Orca {
             terminalHandle: (result["agentTerminalHandle"] as? String)
                 ?? ((result["startupTerminal"] as? [String: Any])?["handle"] as? String),
             name: name, repoName: repo.name, agent: agent)
-        guard customHome else { return session }
+        guard customLaunch else { return session }
 
         guard let path = session.path else {
-            throw Failure.failed("Orca created the worktree but did not say where, so Claude was not started in it.")
+            throw Failure.failed("Orca created the worktree but did not say where, so the agent was not started in it.")
         }
-        let command = try claudeCommand(home: home, prompt: prompt)
+        let command = try launchCommand(agent: agent, home: home, account: account, prompt: prompt)
+        let title = agents.first { $0.id == agent }?.label ?? agent
         let terminal = try await run(["terminal", "create", "--worktree", "path:\(path)",
-                                      "--title", "Claude", "--command", command])
+                                      "--title", title, "--command", command])
         session.terminalHandle = firstString("handle", in: terminal) ?? session.terminalHandle
-        session.claudeHome = home
+        session.claudeHome = home.isEmpty ? nil : home
+        session.githubAccount = account.isEmpty ? nil : account
         return session
+    }
+
+    /// The github.com accounts signed in to the `gh` command. Empty when gh is missing or says nothing.
+    static func githubAccounts() async -> [String] {
+        let candidates = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+        guard let gh = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }),
+              let reply = try? await exec(gh, ["auth", "status", "--json", "hosts"]),
+              let json = (try? JSONSerialization.jsonObject(with: reply.out)) as? [String: Any],
+              let hosts = json["hosts"] as? [String: Any],
+              let accounts = hosts["github.com"] as? [[String: Any]] else { return [] }
+        return accounts.compactMap { $0["login"] as? String }
     }
 
     /// "~/.claude-work" as a full path. Nil when it is not an existing directory.
@@ -114,19 +131,30 @@ enum Orca {
         return path
     }
 
-    /// The shell line that starts Claude with its own home directory and the prompt as first message.
+    /// The shell line that starts the agent with its environment and the prompt as first message.
     /// The prompt travels in a file: ticket text has quotes and newlines that a typed command would mangle.
-    /// The line reads the file into a variable and deletes it before Claude starts.
-    private static func claudeCommand(home: String, prompt: String) throws -> String {
-        guard let directory = resolvedHome(home) else {
-            throw Failure.failed("The Claude home “\(home)” is not a directory on this Mac.")
+    /// The line reads the file into a variable and deletes it before the agent starts.
+    private static func launchCommand(agent: String, home: String, account: String, prompt: String) throws -> String {
+        var environment = ""
+        if !home.isEmpty {
+            guard let directory = resolvedHome(home) else {
+                throw Failure.failed("The Claude home “\(home)” is not a directory on this Mac.")
+            }
+            environment += "CLAUDE_CONFIG_DIR=\(shellQuoted(directory)) "
         }
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("taskdeck-prompt-\(UUID().uuidString).txt")
         try prompt.write(to: file, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         let f = shellQuoted(file.path)
-        return "P=\"$(cat \(f))\"; rm -f \(f); CLAUDE_CONFIG_DIR=\(shellQuoted(directory)) claude \"$P\""
+        let read = "P=\"$(cat \(f))\"; rm -f \(f); "
+        guard !account.isEmpty else { return read + "\(environment)\(agent) \"$P\"" }
+        // The token is read from gh's own keyring in the terminal, so the app never holds it. Without a
+        // token the agent is not started: gh would silently fall back to the active account.
+        let user = shellQuoted(account)
+        let missing = shellQuoted("TaskDeck: gh has no token for \(account). Run: gh auth login")
+        return read + "T=\"$(gh auth token --user \(user))\"; "
+            + "if [ -z \"$T\" ]; then echo \(missing); else GH_TOKEN=\"$T\" \(environment)\(agent) \"$P\"; fi"
     }
 
     private static func shellQuoted(_ text: String) -> String {
@@ -217,14 +245,18 @@ enum Orca {
         let pr = row["linkedPR"] as? [String: Any]
         let prNumber = pr?["number"] as? Int
 
-        if let busy = agents.first(where: { $0["state"] as? String == "working" }) {
-            return Status(kind: .working, tool: busy["toolName"] as? String, prNumber: prNumber)
+        // Orca lists an agent only when its own launcher started it. An agent started by a typed
+        // command (a session with a Claude home or GitHub account) has no entry, so the worktree's
+        // own status and unread mark are read as well.
+        let busy = agents.first { $0["state"] as? String == "working" }
+        if busy != nil || row["status"] as? String == "working" {
+            return Status(kind: .working, tool: busy?["toolName"] as? String, prNumber: prNumber)
         }
         let latest = agents.max { ($0["updatedAt"] as? Double ?? 0) < ($1["updatedAt"] as? Double ?? 0) }
         let message = (latest?["lastAssistantMessage"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        // An agent that stopped is waiting for an answer until the user has looked at it in Orca.
-        // Any state other than "done" (a question, a permission prompt) also needs the user.
-        let stoppedUnseen = latest != nil && row["unread"] as? Bool == true
+        // A worktree that stopped is waiting for an answer until the user has looked at it in Orca.
+        // Any agent state other than "done" (a question, a permission prompt) also needs the user.
+        let stoppedUnseen = row["unread"] as? Bool == true
         let needsUser = latest.map { ($0["state"] as? String ?? "done") != "done" } ?? false
         if stoppedUnseen || needsUser {
             return Status(kind: .yourTurn, lastMessage: message, prNumber: prNumber)
@@ -281,10 +313,20 @@ enum Orca {
     /// Runs `orca <args> --json` and returns the `result` object of its reply.
     private static func run(_ args: [String]) async throws -> [String: Any] {
         guard let executable else { throw Failure.notInstalled }
-        let (status, out, err) = try await Task.detached(priority: .userInitiated) {
+        let (status, out, err) = try await exec(executable, args + ["--json"])
+        let reply = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any]
+        if let reply, reply["ok"] as? Bool == true {
+            return reply["result"] as? [String: Any] ?? [:]
+        }
+        throw Failure.failed(message(reply: reply, status: status, out: out, err: err))
+    }
+
+    /// Runs a command off the main thread and returns its exit status and output.
+    private static func exec(_ executable: String, _ args: [String]) async throws -> (status: Int32, out: Data, err: Data) {
+        try await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = args + ["--json"]
+            process.arguments = args
             // Outside any repository, so Orca never infers a worktree from where this app was started.
             process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
             let outPipe = Pipe(), errPipe = Pipe()
@@ -299,12 +341,6 @@ enum Orca {
             process.waitUntilExit()
             return (process.terminationStatus, outData, errData)
         }.value
-
-        let reply = (try? JSONSerialization.jsonObject(with: out)) as? [String: Any]
-        if let reply, reply["ok"] as? Bool == true {
-            return reply["result"] as? [String: Any] ?? [:]
-        }
-        throw Failure.failed(message(reply: reply, status: status, out: out, err: err))
     }
 
     private static func message(reply: [String: Any]?, status: Int32, out: Data, err: Data) -> String {

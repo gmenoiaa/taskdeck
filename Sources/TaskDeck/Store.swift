@@ -335,11 +335,13 @@ final class AppStore {
 
     /// Records a session that Orca just started, and remembers the repository for the task's project.
     /// `claudeHome` is remembered too when the session ran Claude (nil leaves the project's value alone).
-    func addSession(_ session: AgentSession, to id: UUID, repoId: String, claudeHome: String? = nil) {
+    func addSession(_ session: AgentSession, to id: UUID, repoId: String, claudeHome: String? = nil,
+                    githubAccount: String) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].sessions = (tasks[i].sessions ?? []) + [session]
         if let p = projects.firstIndex(where: { $0.id == tasks[i].projectId }) {
             projects[p].orcaRepoId = repoId
+            projects[p].githubAccount = githubAccount.isEmpty ? nil : githubAccount
             if let claudeHome { projects[p].claudeHome = claudeHome.isEmpty ? nil : claudeHome }
         }
         save()

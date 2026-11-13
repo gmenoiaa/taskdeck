@@ -130,7 +130,9 @@ struct ProjectEditor: View {
                     Section("Agent sessions") {
                         TextField("Claude home", text: Binding(get: { project.claudeHome ?? "" }, set: { project.claudeHome = $0 }),
                                   prompt: Text("~/.claude (default)"))
-                        Text("The directory Claude Code keeps its settings, MCP servers and logs in. Sessions started in Orca for this project use it.")
+                        GitHubAccountPicker(selection: Binding(get: { project.githubAccount ?? "" },
+                                                               set: { project.githubAccount = $0.isEmpty ? nil : $0 }))
+                        Text("Sessions started in Orca for this project use these: the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -157,7 +159,7 @@ struct ProjectEditor: View {
         }
         .frame(width: 480)
         // Room for the "Agent sessions" section when it is shown.
-        .frame(minHeight: (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 110 : 0))
+        .frame(minHeight: (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 150 : 0))
         .onAppear {
             apiKey = Keychain.get(account: project.keychainAccount) ?? ""
         }
