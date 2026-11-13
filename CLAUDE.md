@@ -48,6 +48,33 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
 - Private notes are never sent to the AI — the UI promises this, keep it true.
 - Comments explain *why*, not *what*. User-facing text is plain English, no marketing tone.
 
+## Memory and identity files
+
+This file is the project's own instructions and lives in the repository — it is the first thing
+to read and the right place for anything about *this app*: how to build it, its conventions, its
+structure.
+
+Claude's memory is somewhere else: `~/.claude/projects/<this-project>/memory/`, outside the
+repository and not shared with anyone. One file per fact, with an index in `MEMORY.md`. That is
+the place for what the repository cannot show — a preference the user expressed, a correction
+they made and why, a link to a dashboard or ticket, an ongoing goal. It is currently empty.
+
+Which file gets what:
+
+- A rule about the code or the build, true for anyone working here → **CLAUDE.md**, committed.
+- Something about how the user wants to be worked with, or context that only exists in our
+  conversations → **memory**, not committed.
+- Never put personal details, API keys or anything about the user's accounts in CLAUDE.md: it is
+  public in this repository.
+
+Do not save to memory what the repository already records (file layout, past fixes, git history,
+what this file says), or what only matters to one conversation. A memory that names a file or a
+flag was true when written — check it still exists before acting on it.
+
+Identity files (`SOUL.md`, `IDENTITY.md`, `USER.md`, `MEMORY.md` at the Alan workspace root) and
+the `.alan/` workspace belong to a separate setup and are **not** part of this project. If they
+are not there, do not create them here.
+
 ## Git
 
 Commit or push only when the user asks for it. Commit messages end with the Co-Authored-By line
