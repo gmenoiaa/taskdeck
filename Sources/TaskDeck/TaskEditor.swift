@@ -34,8 +34,8 @@ struct TaskEditor: View {
         VStack(spacing: 0) {
             Form {
                 Section {
-                    Picker("Project", selection: $task.projectId) {
-                        Text("No project").tag(UUID?.none)
+                    Picker("Space", selection: $task.projectId) {
+                        Text("No space").tag(UUID?.none)
                         ForEach(store.projects) { p in
                             Text("\(p.name) · \(p.kind.label)").tag(UUID?.some(p.id))
                         }
@@ -48,7 +48,7 @@ struct TaskEditor: View {
                         }
                     } else if project != nil, project?.baseURL.isEmpty == true, !ticket.isEmpty,
                               !ticket.lowercased().hasPrefix("http") {
-                        Text("Set the project's base URL (or paste the full link) to generate the link.")
+                        Text("Set the space's base URL (or paste the full link) to generate the link.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     HStack {

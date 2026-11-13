@@ -4,6 +4,8 @@ import AppKit
 struct BoardView: View {
     @Environment(AppStore.self) private var store
     @State private var filter: UUID?
+    /// The space last shown, so the board opens on it again.
+    @AppStorage("boardSpace") private var savedSpace = ""
     @State private var editing: TaskItem?
     @State private var logging: TaskItem?
     @State private var details: TaskItem?
@@ -71,10 +73,15 @@ private func newTask() {
                 .frame(height: geo.size.height)
             }
         }
+        .onAppear {
+            // A space deleted since last time falls back to all spaces.
+            if let id = UUID(uuidString: savedSpace), store.project(id) != nil { filter = id }
+        }
+        .onChange(of: filter) { _, new in savedSpace = new?.uuidString ?? "" }
         .toolbar {
             ToolbarItem(placement: .navigation) {
-                Picker("Project", selection: $filter) {
-                    Text("All projects").tag(UUID?.none)
+                Picker("Space", selection: $filter) {
+                    Text("All spaces").tag(UUID?.none)
                     ForEach(store.projects) { p in
                         Text(p.name).tag(UUID?.some(p.id))
                     }
@@ -82,7 +89,7 @@ private func newTask() {
                 .fixedSize()
             }
             ToolbarItem(placement: .principal) {
-                // With "All projects", a click shows today's time per project.
+                // With "All spaces", a click shows today's time per space.
                 Button { if filter == nil { showToday.toggle() } } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "clock")
@@ -92,7 +99,7 @@ private func newTask() {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
                 }
-                .help(filter == nil ? "Show today's time per project" : "Time tracked today on this project")
+                .help(filter == nil ? "Show today's time per space" : "Time tracked today in this space")
                 .popover(isPresented: $showToday, arrowEdge: .bottom) {
                     TodayBreakdown().environment(store)
                 }
@@ -130,7 +137,7 @@ private func newTask() {
                 SettingsLink {
                     Label("Settings", systemImage: "gearshape")
                 }
-                .help("Settings: projects, AI and timers (⌘,)")
+                .help("Settings: spaces, AI and timers (⌘,)")
             }
             newTaskItem
         }
@@ -322,7 +329,7 @@ struct TaskCard: View {
                 if let session = store.headlineSession(of: task) {
                     let status = store.status(of: session)
                     Button { Task { await Orca.reveal(session) } } label: {
-                        SessionBadge(status: status, count: task.sessions?.count ?? 1)
+                        SessionBadge(status: status, count: store.sessions(of: task).count)
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -405,7 +412,7 @@ struct TaskCard: View {
     }
 }
 
-/// Popover of the toolbar's "Today" total: time tracked today, per project.
+/// Popover of the toolbar's "Today" total: time tracked today, per space.
 struct TodayBreakdown: View {
     @Environment(AppStore.self) private var store
 
@@ -418,14 +425,14 @@ struct TodayBreakdown: View {
             .sorted { $0.seconds > $1.seconds }
         let other = total - rows.reduce(0) { $0 + $1.seconds }
         VStack(alignment: .leading, spacing: 8) {
-            Text("Today by project").font(.headline)
+            Text("Today by space").font(.headline)
             if total < 1 {
                 Text("No time tracked today.").foregroundStyle(.secondary)
             }
             ForEach(rows, id: \.project.id) { row in
                 line(row.project.name, row.seconds, color: row.project.color)
             }
-            if other >= 1 { line("No project", other, color: .gray) }
+            if other >= 1 { line("No space", other, color: .gray) }
             if total >= 1 {
                 Divider()
                 HStack {

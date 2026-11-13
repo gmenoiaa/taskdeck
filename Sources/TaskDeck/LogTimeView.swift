@@ -188,7 +188,7 @@ struct LogTimeView: View {
 
         guard let project, let client = RedmineClient(project: project) else {
             failed = true
-            message = "Set the project's base URL and API key in Settings → Projects."
+            message = "Set the space's base URL and API key in Settings → Spaces."
             return
         }
         do {
@@ -231,7 +231,7 @@ struct LogTimeView: View {
         guard let task, let project, let issueId = Int(task.ref) else { return }
         guard let client = RedmineClient(project: project) else {
             failed = true
-            message = "Set the project's base URL and API key in Settings → Projects."
+            message = "Set the space's base URL and API key in Settings → Spaces."
             return
         }
         busy = true

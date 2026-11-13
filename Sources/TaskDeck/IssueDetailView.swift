@@ -56,7 +56,7 @@ struct IssueDetailView: View {
                     switch tab {
                     case .ticket:
                         // Shown even when the ticket cannot be fetched: the sessions are saved here.
-                        if !(task?.sessions ?? []).isEmpty {
+                        if let task, !store.sessions(of: task).isEmpty {
                             section("Agent sessions") { SessionsList(taskId: taskId) }
                         }
                         if let detail {

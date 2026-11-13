@@ -90,7 +90,7 @@ extension TicketFetcher {
 
     private static func assignedGitHub(_ project: Project) async throws -> [RemoteTicket] {
         guard let token = Keychain.get(account: project.keychainAccount), !token.isEmpty else {
-            throw RedmineError(message: "To list what is assigned to you, set a GitHub token in Settings → Projects.")
+            throw RedmineError(message: "To list what is assigned to you, set a GitHub token in Settings → Spaces.")
         }
         let c = URLComponents(string: project.baseURL.trimmingCharacters(in: .whitespacesAndNewlines))
         let api = githubAPIBase(host: c?.host ?? "github.com", scheme: c?.scheme)

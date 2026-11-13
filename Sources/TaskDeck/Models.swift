@@ -79,6 +79,8 @@ struct BoardColumn: Identifiable, Codable, Hashable {
     ]
 }
 
+/// Called a "space" everywhere the user can see. The type and the saved keys keep the older name so
+/// existing data files load unchanged.
 struct Project: Identifiable, Codable, Hashable {
     var id = UUID()
     var name = ""
@@ -90,17 +92,31 @@ struct Project: Identifiable, Codable, Hashable {
     var username: String?
     /// Redmine: "textile" (default) or "markdown", matching the instance's setting.
     var textFormat: String?
-    /// Orca repository last used to start a session for this project; preselected next time.
+    /// Orca repository last used to start a session for this space; preselected next time.
     var orcaRepoId: String?
+    /// The Orca repositories that belong to this space. Nil in files saved before a space could have
+    /// more than one; `repoIds` covers both.
+    var orcaRepoIds: [String]?
     /// Claude Code's home directory for this project's agent sessions (e.g. "~/.claude-work"), as typed.
     /// Empty or nil means Claude's own default.
     var claudeHome: String?
+    /// A GitHub organisation whose Orca repositories all belong to this space, besides the ticked ones.
+    var githubOrg: String?
     /// The `gh` account this project's agent sessions use. Empty or nil means gh's active account.
     var githubAccount: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }
     var keychainAccount: String { "apikey-\(id.uuidString)" }
+    var repoIds: [String] { orcaRepoIds ?? [orcaRepoId].compactMap { $0 } }
+
+    /// The space's repositories among those Orca has: the ticked ones plus every repository of its
+    /// GitHub organisation, so one added to Orca later belongs to the space without another step.
+    func owns(_ repo: Orca.Repo) -> Bool {
+        if repoIds.contains(repo.id) { return true }
+        guard let org = githubOrg, !org.isEmpty, let owner = repo.owner else { return false }
+        return owner.caseInsensitiveCompare(org) == .orderedSame
+    }
 }
 
 struct TimeEntry: Identifiable, Codable, Hashable {

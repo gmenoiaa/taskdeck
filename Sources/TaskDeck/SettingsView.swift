@@ -15,7 +15,7 @@ struct SettingsView: View {
                 .tag("board")
             ProjectsView()
                 .frame(width: 560, height: 420)
-                .tabItem { Label("Projects", systemImage: "folder") }
+                .tabItem { Label("Spaces", systemImage: "folder") }
                 .tag("projects")
             AISettings()
                 .tabItem { Label("AI", systemImage: "sparkles") }

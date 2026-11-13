@@ -23,6 +23,15 @@ struct StartSessionView: View {
     private var task: TaskItem? { store.task(taskId) }
     private var project: Project? { store.project(task?.projectId) }
     private var repo: Orca.Repo? { repos.first { $0.id == repoId } }
+    /// The space's own repositories come first in the list; the rest stay reachable below them.
+    private var spaceRepos: [Orca.Repo] {
+        guard let project else { return [] }
+        return repos.filter(project.owns)
+    }
+    private var otherRepos: [Orca.Repo] {
+        guard let project else { return repos }
+        return repos.filter { !project.owns($0) }
+    }
     private var homeTyped: String { claudeHome.trimmingCharacters(in: .whitespaces) }
     /// A home that was typed but is not a directory. An empty field is fine: Claude's default.
     private var homeMissing: Bool {
@@ -48,7 +57,16 @@ struct StartSessionView: View {
             Form {
                 Picker("Repository", selection: $repoId) {
                     if repoId.isEmpty { Text(loading ? "Loading…" : "Choose…").tag("") }
-                    ForEach(repos) { Text($0.name).tag($0.id) }
+                    if spaceRepos.isEmpty {
+                        ForEach(repos) { Text($0.name).tag($0.id) }
+                    } else {
+                        Section(project?.name ?? "This space") {
+                            ForEach(spaceRepos) { Text($0.name).tag($0.id) }
+                        }
+                        Section("Other repositories") {
+                            ForEach(otherRepos) { Text($0.name).tag($0.id) }
+                        }
+                    }
                 }
                 .disabled(repos.isEmpty)
                 Picker("Agent", selection: $agent) {
@@ -56,7 +74,7 @@ struct StartSessionView: View {
                 }
                 if agent == "claude" {
                     TextField("Claude home", text: $claudeHome, prompt: Text("~/.claude (default)"))
-                        .help("The directory Claude Code keeps its settings, MCP servers and logs in. Remembered for this project.")
+                        .help("The directory Claude Code keeps its settings, MCP servers and logs in. Remembered for this space.")
                     if homeMissing {
                         Text("“\(homeTyped)” is not a directory on this Mac.")
                             .font(.caption).foregroundStyle(.red)
@@ -111,6 +129,8 @@ struct StartSessionView: View {
             repos = try await Orca.repos()
             if let saved = project?.orcaRepoId, repos.contains(where: { $0.id == saved }) {
                 repoId = saved
+            } else if spaceRepos.count == 1 {
+                repoId = spaceRepos[0].id
             }
             if repos.isEmpty { error = "Orca has no repositories yet. Add one in Orca first." }
         } catch {
@@ -135,6 +155,117 @@ struct StartSessionView: View {
         } catch {
             self.error = "Orca could not start the session: \(error.localizedDescription)"
         }
+    }
+}
+
+/// Ticks the Orca repositories that belong to a space.
+struct SpaceRepositories: View {
+    @Binding var selection: [String]
+    /// The organisation whose repositories all belong to the space; empty for none.
+    @Binding var organisation: String
+    @State private var repos: [Orca.Repo] = []
+    @State private var search = ""
+    /// The GitHub organisation shown; empty for all of them.
+    @State private var owner = ""
+    @State private var failure: String?
+    @State private var loaded = false
+
+    private var owners: [String] {
+        Set(repos.compactMap(\.owner)).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+    private var shown: [Orca.Repo] {
+        let query = search.trimmingCharacters(in: .whitespaces)
+        return repos.filter { repo in
+            (owner.isEmpty || repo.owner == owner)
+                && (query.isEmpty || repo.name.localizedCaseInsensitiveContains(query))
+        }
+    }
+    private var allShownTicked: Bool { shown.allSatisfy { selection.contains($0.id) } }
+    /// Saved ids that Orca no longer lists. Shown so they can be removed instead of lingering unseen.
+    private var missing: [String] {
+        loaded && failure == nil ? selection.filter { id in !repos.contains { $0.id == id } } : []
+    }
+
+    private func included(_ repo: Orca.Repo) -> Bool {
+        !organisation.isEmpty && repo.owner?.caseInsensitiveCompare(organisation) == .orderedSame
+    }
+
+    var body: some View {
+        if owners.count > 0 || !organisation.isEmpty {
+            Picker("GitHub organisation", selection: $organisation) {
+                Text("None").tag("")
+                ForEach(owners.contains(organisation) || organisation.isEmpty ? owners : owners + [organisation],
+                        id: \.self) { Text($0).tag($0) }
+            }
+            .help("Every Orca repository of this organisation belongs to the space, including ones added later.")
+        }
+        LabeledContent("Repositories") {
+            VStack(alignment: .leading, spacing: 6) {
+                if let failure {
+                    Text(failure).font(.caption).foregroundStyle(.red)
+                } else if !loaded {
+                    ProgressView().controlSize(.small)
+                } else if repos.isEmpty {
+                    Text("Orca has no repositories yet.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    if owners.count > 1 {
+                        HStack(spacing: 6) {
+                            Picker("Organisation", selection: $owner) {
+                                Text("All organisations").tag("")
+                                ForEach(owners, id: \.self) { Text($0).tag($0) }
+                            }
+                            .labelsHidden()
+                            // Only with an organisation chosen: ticking every repository Orca has is never wanted.
+                            if !owner.isEmpty, !shown.isEmpty {
+                                Button(allShownTicked ? "Untick all" : "Tick all") { tickShown(!allShownTicked) }
+                                    .controlSize(.small)
+                            }
+                        }
+                    }
+                    if repos.count > 8 {
+                        TextField("Filter", text: $search, prompt: Text("Filter by name"))
+                            .textFieldStyle(.roundedBorder).labelsHidden()
+                    }
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(shown) { repo in
+                                if included(repo) {
+                                    Toggle(repo.name, isOn: .constant(true)).toggleStyle(.checkbox).disabled(true)
+                                        .help("Included by the space's organisation.")
+                                } else {
+                                    Toggle(repo.name, isOn: binding(repo.id)).toggleStyle(.checkbox)
+                                }
+                            }
+                            ForEach(missing, id: \.self) { id in
+                                Toggle("No longer in Orca", isOn: binding(id)).toggleStyle(.checkbox)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 110)
+                }
+            }
+            .frame(maxWidth: 260, alignment: .leading)
+        }
+        .task {
+            do { repos = try await Orca.repos() } catch { failure = error.localizedDescription }
+            loaded = true
+        }
+    }
+
+    private func tickShown(_ on: Bool) {
+        let ids = shown.map(\.id)
+        selection.removeAll { ids.contains($0) }
+        if on { selection += ids }
+    }
+
+    private func binding(_ id: String) -> Binding<Bool> {
+        Binding(get: { selection.contains(id) },
+                set: { on in
+                    if on { if !selection.contains(id) { selection.append(id) } }
+                    else { selection.removeAll { $0 == id } }
+                })
     }
 }
 
@@ -206,7 +337,7 @@ struct SessionsList: View {
     }()
 
     var body: some View {
-        let sessions = (store.task(taskId)?.sessions ?? []).reversed()
+        let sessions = (store.task(taskId).map(store.sessions(of:)) ?? []).reversed()
         VStack(spacing: 6) {
             ForEach(Array(sessions)) { session in
                 let status = store.status(of: session)
@@ -229,11 +360,14 @@ struct SessionsList: View {
                     }
                     Spacer(minLength: 8)
                     Button("Open in Orca") { Task { await Orca.reveal(session) } }
-                    Button { store.removeSession(session.id, from: taskId) } label: {
-                        Image(systemName: "xmark")
+                    // A worktree matched by its name would only be found again on the next refresh.
+                    if !session.agent.isEmpty {
+                        Button { store.removeSession(session.id, from: taskId) } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove from this list. The worktree stays in Orca.")
                     }
-                    .buttonStyle(.borderless)
-                    .help("Remove from this list. The worktree stays in Orca.")
                 }
                 .padding(10)
                 .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
@@ -242,6 +376,6 @@ struct SessionsList: View {
     }
 
     private func agentLabel(_ id: String) -> String {
-        Orca.agents.first { $0.id == id }?.label ?? id
+        id.isEmpty ? "Created in Orca" : Orca.agents.first { $0.id == id }?.label ?? id
     }
 }

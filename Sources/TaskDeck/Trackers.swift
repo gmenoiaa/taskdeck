@@ -72,7 +72,7 @@ enum HTTP {
 }
 
 enum TicketFetcher {
-    static let missingCredentials = RedmineError(message: "Set the project's base URL and credentials in Settings → Projects.")
+    static let missingCredentials = RedmineError(message: "Set the space's base URL and credentials in Settings → Spaces.")
 
     static func canFetch(project: Project?, task: TaskItem) -> Bool {
         guard let project else { return false }
@@ -97,7 +97,7 @@ enum TicketFetcher {
         case .github:
             return try await github(project: project, url: url)
         case .other:
-            throw RedmineError(message: "This project type has no integration.")
+            throw RedmineError(message: "This space's tracker has no integration.")
         }
     }
 
@@ -126,13 +126,13 @@ enum TicketFetcher {
                 throw RedmineError(message: "Could not find the repository and number in the ticket link.")
             }
             guard let token = Keychain.get(account: project.keychainAccount), !token.isEmpty else {
-                throw RedmineError(message: "To comment, set a GitHub token in Settings → Projects.")
+                throw RedmineError(message: "To comment, set a GitHub token in Settings → Spaces.")
             }
             try await HTTP.send("POST", "\(p.api)/repos/\(p.owner)/\(p.repo)/issues/\(p.number)/comments",
                                 headers: githubHeaders(token: token),
                                 body: ["body": text])
         case .other:
-            throw RedmineError(message: "This project type has no integration.")
+            throw RedmineError(message: "This space's tracker has no integration.")
         }
     }
 
