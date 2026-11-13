@@ -100,6 +100,8 @@ struct Project: Identifiable, Codable, Hashable {
     /// Claude Code's home directory for this project's agent sessions (e.g. "~/.claude-work"), as typed.
     /// Empty or nil means Claude's own default.
     var claudeHome: String?
+    /// A GitHub organisation whose Orca repositories all belong to this space, besides the ticked ones.
+    var githubOrg: String?
     /// The `gh` account this project's agent sessions use. Empty or nil means gh's active account.
     var githubAccount: String?
 
@@ -107,6 +109,14 @@ struct Project: Identifiable, Codable, Hashable {
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }
     var keychainAccount: String { "apikey-\(id.uuidString)" }
     var repoIds: [String] { orcaRepoIds ?? [orcaRepoId].compactMap { $0 } }
+
+    /// The space's repositories among those Orca has: the ticked ones plus every repository of its
+    /// GitHub organisation, so one added to Orca later belongs to the space without another step.
+    func owns(_ repo: Orca.Repo) -> Bool {
+        if repoIds.contains(repo.id) { return true }
+        guard let org = githubOrg, !org.isEmpty, let owner = repo.owner else { return false }
+        return owner.caseInsensitiveCompare(org) == .orderedSame
+    }
 }
 
 struct TimeEntry: Identifiable, Codable, Hashable {

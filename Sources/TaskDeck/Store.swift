@@ -23,6 +23,14 @@ final class AppStore {
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     /// Live status of Orca worktrees by id; nil until Orca answered, or when it cannot be reached.
     var sessionStatuses: [String: Orca.Status]?
+    /// Worktrees created in Orca that carry a task's ticket reference, by task id. Never saved: they
+    /// are found again from Orca on every refresh.
+    var linkedSessions: [UUID: [AgentSession]] = [:]
+    /// Pull requests found by asking GitHub directly, by worktree id, for when Orca reports none.
+    @ObservationIgnored private var pullRequests: [String: Orca.PullRequest] = [:]
+    @ObservationIgnored private var pullRequestAsked: [String: Date] = [:]
+    @ObservationIgnored private var orcaRepos: [Orca.Repo] = []
+    @ObservationIgnored private var orcaReposAt = Date.distantPast
     @ObservationIgnored private var sessionLoop: Task<Void, Never>?
     @ObservationIgnored private var refreshingSessions = false
 
@@ -350,15 +358,107 @@ final class AppStore {
         Task { await refreshSessionStatuses() }
     }
 
-    /// Asks Orca about every worktree, but only when some task on the board has a session.
+    /// Asks Orca about every worktree, but only when a task has a session or a space has repositories
+    /// whose worktrees could belong to a task.
     func refreshSessionStatuses() async {
-        guard !refreshingSessions, Orca.isInstalled,
-              tasks.contains(where: { !$0.archived && !($0.sessions ?? []).isEmpty }) else { return }
+        guard !refreshingSessions, Orca.isInstalled else { return }
+        let spaces = projects.filter { !$0.repoIds.isEmpty || !($0.githubOrg ?? "").isEmpty }
+        guard !spaces.isEmpty || tasks.contains(where: { !$0.archived && !($0.sessions ?? []).isEmpty }) else { return }
         refreshingSessions = true
         defer { refreshingSessions = false }
-        // Orca closed or not answering: show no status rather than a stale one.
-        let fresh = try? await Orca.statuses()
+        guard let trees = try? await Orca.worktrees() else {
+            // Orca closed or not answering: show no status rather than a stale one.
+            if sessionStatuses != nil { sessionStatuses = nil }
+            return
+        }
+        // Repositories change rarely; they are needed for organisations and for asking GitHub.
+        if Date().timeIntervalSince(orcaReposAt) > 300, let repos = try? await Orca.repos() {
+            orcaRepos = repos
+            orcaReposAt = Date()
+        }
+        link(trees, spaces: spaces)
+        publish(trees)
+        if await askGitHub(trees) { publish(trees) }
+    }
+
+    /// Matches worktrees created in Orca to tasks: same space, and the ticket reference in the name or branch.
+    private func link(_ trees: [Orca.Worktree], spaces: [Project]) {
+        let saved = Set(tasks.flatMap { $0.sessions ?? [] }.compactMap(\.worktreeId))
+        let known = Dictionary(linkedSessions.values.flatMap { $0 }.compactMap { s in s.worktreeId.map { ($0, s.id) } },
+                               uniquingKeysWith: { first, _ in first })
+        var fresh: [UUID: [AgentSession]] = [:]
+        for space in spaces {
+            let repoIds = Set(space.repoIds).union(orcaRepos.filter(space.owns).map(\.id))
+            // The main checkout is the repository itself, not work on one ticket.
+            let candidates = trees.filter { repoIds.contains($0.repoId) && !$0.isMain && !saved.contains($0.id) }
+            guard !candidates.isEmpty else { continue }
+            for task in tasks where task.projectId == space.id && !task.archived && !task.ref.isEmpty {
+                let found = candidates
+                    .filter { Orca.mentions(task.ref, in: $0.name) || Orca.mentions(task.ref, in: $0.branch) }
+                    .sorted { ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
+                    .map { tree in
+                        // The same id as last time, so the views do not rebuild their rows every refresh.
+                        AgentSession(id: known[tree.id] ?? UUID(), worktreeId: tree.id, path: tree.path,
+                                     name: tree.name, repoName: tree.repoName, agent: "",
+                                     startedAt: tree.createdAt ?? .distantPast)
+                    }
+                if !found.isEmpty { fresh[task.id] = found }
+            }
+        }
+        if linkedSessions != fresh { linkedSessions = fresh }
+    }
+
+    /// Turns Orca's answer into the statuses the views read, with GitHub's pull request where Orca has none.
+    private func publish(_ trees: [Orca.Worktree]) {
+        var fresh: [String: Orca.Status] = [:]
+        for tree in trees {
+            var status = tree.status
+            if status.prNumber == nil, let pr = pullRequests[tree.id] {
+                status.prNumber = pr.number
+                if status.kind == .idle {
+                    status.kind = pr.state == "open" ? .prOpen : pr.state == "merged" ? .prMerged : .prClosed
+                }
+            }
+            fresh[tree.id] = status
+        }
         if sessionStatuses != fresh { sessionStatuses = fresh }
+    }
+
+    /// Asks GitHub about sessions for which Orca reports no pull request, as the space's GitHub account.
+    /// A few per refresh and each at most every five minutes. Returns whether anything changed.
+    private func askGitHub(_ trees: [Orca.Worktree]) async -> Bool {
+        let byId = Dictionary(trees.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let slugs = Dictionary(orcaRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
+                               uniquingKeysWith: { first, _ in first })
+        var due: [(tree: Orca.Worktree, slug: String, account: String?)] = []
+        for task in tasks where !task.archived {
+            for session in sessions(of: task) {
+                guard let id = session.worktreeId, let tree = byId[id], !tree.branch.isEmpty,
+                      tree.status.prNumber == nil, tree.status.kind != .working,
+                      let slug = slugs[tree.repoId] else { continue }
+                // A merged or closed pull request does not change again.
+                if let pr = pullRequests[id], pr.state != "open" { continue }
+                if let asked = pullRequestAsked[id], Date().timeIntervalSince(asked) < 300 { continue }
+                if due.contains(where: { $0.tree.id == id }) { continue }
+                due.append((tree, slug, session.githubAccount ?? project(task.projectId)?.githubAccount))
+            }
+        }
+        var changed = false
+        for item in due.prefix(3) {
+            pullRequestAsked[item.tree.id] = Date()
+            // A failed question keeps what was known; only a real answer replaces it.
+            guard let answer = await Orca.pullRequest(slug: item.slug, branch: item.tree.branch, account: item.account) else { continue }
+            if pullRequests[item.tree.id] != answer {
+                pullRequests[item.tree.id] = answer
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    /// A task's sessions: those started here, then worktrees created in Orca that carry its reference.
+    func sessions(of task: TaskItem) -> [AgentSession] {
+        (task.sessions ?? []) + (linkedSessions[task.id] ?? [])
     }
 
     /// The live status of a session; nil when Orca did not answer or the session has no worktree id.
@@ -370,7 +470,7 @@ final class AppStore {
     /// The session a card should show: one that waits for the user first, then one that is working,
     /// otherwise the newest.
     func headlineSession(of task: TaskItem) -> AgentSession? {
-        let sessions = task.sessions ?? []
+        let sessions = sessions(of: task)
         return sessions.last { status(of: $0)?.kind == .yourTurn }
             ?? sessions.last { status(of: $0)?.kind == .working }
             ?? sessions.last

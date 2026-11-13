@@ -128,13 +128,15 @@ struct ProjectEditor: View {
                 }
                 if Orca.isInstalled {
                     Section("Agent sessions") {
-                        SpaceRepositories(selection: Binding(get: { project.repoIds },
-                                                             set: { project.orcaRepoIds = $0 }))
+                        SpaceRepositories(
+                            selection: Binding(get: { project.repoIds }, set: { project.orcaRepoIds = $0 }),
+                            organisation: Binding(get: { project.githubOrg ?? "" },
+                                                  set: { project.githubOrg = $0.isEmpty ? nil : $0 }))
                         TextField("Claude home", text: Binding(get: { project.claudeHome ?? "" }, set: { project.claudeHome = $0 }),
                                   prompt: Text("~/.claude (default)"))
                         GitHubAccountPicker(selection: Binding(get: { project.githubAccount ?? "" },
                                                                set: { project.githubAccount = $0.isEmpty ? nil : $0 }))
-                        Text("The repositories are offered first when you start a session from one of this space's tasks. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
+                        Text("The repositories are offered first when you start a session from one of this space's tasks, and their Orca worktrees named after a ticket show on that task. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -161,7 +163,7 @@ struct ProjectEditor: View {
         }
         .frame(width: 480)
         // Room for the "Agent sessions" section when it is shown.
-        .frame(minHeight: (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 330 : 0))
+        .frame(minHeight: (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 370 : 0))
         .onAppear {
             apiKey = Keychain.get(account: project.keychainAccount) ?? ""
         }

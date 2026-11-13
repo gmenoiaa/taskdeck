@@ -329,7 +329,7 @@ struct TaskCard: View {
                 if let session = store.headlineSession(of: task) {
                     let status = store.status(of: session)
                     Button { Task { await Orca.reveal(session) } } label: {
-                        SessionBadge(status: status, count: task.sessions?.count ?? 1)
+                        SessionBadge(status: status, count: store.sessions(of: task).count)
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)

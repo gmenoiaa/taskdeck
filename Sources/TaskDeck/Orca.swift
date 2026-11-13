@@ -12,6 +12,7 @@ struct AgentSession: Identifiable, Codable, Hashable {
     /// The worktree name given at creation, also the base of its branch name.
     var name: String
     var repoName: String
+    /// Empty for a worktree that was created in Orca and matched to the task by its ticket reference.
     var agent: String
     /// The Claude home directory the agent was started with, as typed; nil for the default.
     var claudeHome: String?
@@ -28,6 +29,27 @@ enum Orca {
         let path: String
         /// The GitHub organisation or user the repository's remote points at, when Orca knows it.
         var owner: String?
+        /// "owner/name" on github.com, for asking GitHub about the repository.
+        var slug: String?
+    }
+
+    /// A checkout Orca manages, with what it is doing right now.
+    struct Worktree: Hashable {
+        let id: String
+        let repoId: String
+        let repoName: String
+        let name: String
+        let branch: String
+        let path: String
+        let isMain: Bool
+        let createdAt: Date?
+        var status: Status
+    }
+
+    struct PullRequest: Hashable {
+        let number: Int
+        /// "open", "merged" or "closed".
+        let state: String
     }
 
     /// Agents offered in the app. Orca knows more ids; these are the two it manages accounts for.
@@ -72,7 +94,9 @@ enum Orca {
             // "github.com/owner/name", as Orca records the remote.
             let remote = ((row["gitRemoteIdentity"] as? [String: Any])?["canonicalKey"] as? String ?? "")
                 .split(separator: "/")
-            return Repo(id: id, name: name, path: path, owner: remote.count >= 3 ? String(remote[1]) : nil)
+            let onGitHub = remote.count >= 3 && remote[0] == "github.com"
+            return Repo(id: id, name: name, path: path, owner: remote.count >= 3 ? String(remote[1]) : nil,
+                        slug: onGitHub ? remote[1...].joined(separator: "/") : nil)
         }
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
@@ -118,13 +142,43 @@ enum Orca {
 
     /// The github.com accounts signed in to the `gh` command. Empty when gh is missing or says nothing.
     static func githubAccounts() async -> [String] {
-        let candidates = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
-        guard let gh = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }),
+        guard let gh = ghExecutable,
               let reply = try? await exec(gh, ["auth", "status", "--json", "hosts"]),
               let json = (try? JSONSerialization.jsonObject(with: reply.out)) as? [String: Any],
               let hosts = json["hosts"] as? [String: Any],
               let accounts = hosts["github.com"] as? [[String: Any]] else { return [] }
         return accounts.compactMap { $0["login"] as? String }
+    }
+
+    private static var ghExecutable: String? {
+        ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Asks GitHub for the pull request of a branch. The outer nil means the question could not be
+    /// asked (gh missing, no token, no network); `.some(nil)` means GitHub answered and there is none.
+    static func pullRequest(slug: String, branch: String, account: String?) async -> PullRequest?? {
+        guard let gh = ghExecutable else { return nil }
+        let list = ["pr", "list", "--repo", slug, "--head", branch, "--state", "all",
+                    "--json", "number,state", "--limit", "10"]
+        let reply: (status: Int32, out: Data, err: Data)?
+        if let account, !account.isEmpty {
+            // The token goes from gh's keyring to gh inside the shell; this app never reads it.
+            // Without a token nothing is asked: gh would silently answer as the active account.
+            let script = "T=\"$(\"$0\" auth token --user \"$1\")\"; [ -n \"$T\" ] || exit 9; shift; GH_TOKEN=\"$T\" exec \"$0\" \"$@\""
+            reply = try? await exec("/bin/sh", ["-c", script, gh, account] + list)
+        } else {
+            reply = try? await exec(gh, list)
+        }
+        guard let reply, reply.status == 0,
+              let rows = (try? JSONSerialization.jsonObject(with: reply.out)) as? [[String: Any]] else { return nil }
+        let found = rows.compactMap { row -> PullRequest? in
+            guard let number = row["number"] as? Int, let state = row["state"] as? String else { return nil }
+            return PullRequest(number: number, state: state.lowercased())
+        }
+        // A branch reused after a merge has several; the one still open is the one that matters.
+        let best = found.first { $0.state == "open" } ?? found.first { $0.state == "merged" } ?? found.first
+        return .some(best)
     }
 
     /// "~/.claude-work" as a full path. Nil when it is not an existing directory.
@@ -184,7 +238,13 @@ enum Orca {
     /// Brings Orca to the front on the session's agent terminal. If the terminal is gone (closed, or
     /// Orca was restarted), Orca still comes forward so the user can find the worktree by name.
     static func reveal(_ session: AgentSession) async {
-        if let handle = session.terminalHandle {
+        var handle = session.terminalHandle
+        // A worktree created in Orca has no saved terminal; any live one of it will do.
+        if handle == nil, let path = session.path,
+           let list = try? await run(["terminal", "list", "--worktree", "path:\(path)"]) {
+            handle = firstString("handle", in: list)
+        }
+        if let handle {
             _ = try? await run(["terminal", "switch", "--terminal", handle])
         }
         await MainActor.run {
@@ -232,17 +292,42 @@ enum Orca {
         }
     }
 
-    /// The status of every worktree Orca knows, by worktree id. One call covers all sessions.
-    static func statuses() async throws -> [String: Status] {
+    /// Every worktree Orca knows. One call covers all sessions.
+    static func worktrees() async throws -> [Worktree] {
         // Far above any real number of worktrees, so the list is never cut short.
         let result = try await run(["worktree", "ps", "--limit", "2000"])
         let rows = result["worktrees"] as? [[String: Any]] ?? []
-        var map: [String: Status] = [:]
-        for row in rows {
-            guard let id = row["worktreeId"] as? String else { continue }
-            map[id] = status(of: row)
+        return rows.compactMap { row in
+            guard let id = row["worktreeId"] as? String, let repoId = row["repoId"] as? String,
+                  let path = row["path"] as? String else { return nil }
+            let branch = (row["branch"] as? String ?? "").replacingOccurrences(of: "refs/heads/", with: "")
+            // Orca gives times in milliseconds.
+            let created = (row["createdAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+            return Worktree(id: id, repoId: repoId, repoName: row["repo"] as? String ?? "",
+                            name: row["displayName"] as? String ?? URL(fileURLWithPath: path).lastPathComponent,
+                            branch: branch, path: path, isMain: row["isMainWorktree"] as? Bool ?? false,
+                            createdAt: created, status: status(of: row))
         }
-        return map
+    }
+
+    /// Whether a ticket reference appears in a worktree's name or branch as a whole word:
+    /// "37662" is in "WEBSITE-37662-shipping" but "3766" is not.
+    static func mentions(_ ref: String, in text: String) -> Bool {
+        // "repo#123" is written as just the number in branch names.
+        let key = (ref.split(separator: "#").last.map(String.init) ?? ref).lowercased()
+        // Shorter than this, a number matches by accident ("v12", "step-12").
+        guard key.count >= 3 else { return false }
+        let hay = text.lowercased()
+        var from = hay.startIndex
+        while let found = hay.range(of: key, range: from..<hay.endIndex) {
+            let before = found.lowerBound == hay.startIndex ? nil : hay[hay.index(before: found.lowerBound)]
+            let after = found.upperBound == hay.endIndex ? nil : hay[found.upperBound]
+            let whole = !(before.map { $0.isLetter || $0.isNumber } ?? false)
+                && !(after.map { $0.isLetter || $0.isNumber } ?? false)
+            if whole { return true }
+            from = found.upperBound
+        }
+        return false
     }
 
     private static func status(of row: [String: Any]) -> Status {
