@@ -146,7 +146,9 @@ private func newTask() {
             logPending: pendingSeconds > 0 ? { showPending = true } : nil,
             showArchive: { showArchive = true },
             search: { searching = true },
-            show: { tab = $0 }))
+            show: { tab = $0 },
+            space: filter,
+            showSpace: { filter = $0 }))
         .onAppear {
             // A space deleted since last time falls back to all spaces.
             if let id = UUID(uuidString: savedSpace), store.project(id) != nil { filter = id }
@@ -271,6 +273,9 @@ struct BoardActions {
     var search: () -> Void
     /// "overview" or "board".
     var show: (String) -> Void
+    /// The space shown, nil for all spaces.
+    var space: UUID?
+    var showSpace: (UUID?) -> Void
 }
 
 private struct BoardActionsKey: FocusedValueKey {
@@ -323,6 +328,23 @@ struct AppCommands: Commands {
             Button("Search Tasks") { board?.search() }
                 .keyboardShortcut("f", modifiers: .command)
                 .disabled(board == nil)
+            Divider()
+            // Toggles, so the space being shown carries a checkmark.
+            Toggle("All Spaces", isOn: Binding(get: { board != nil && board?.space == nil },
+                                               set: { _ in board?.showSpace(nil) }))
+                .keyboardShortcut("0", modifiers: [.command, .option])
+                .disabled(board == nil)
+            ForEach(Array(store.projects.enumerated()), id: \.element.id) { index, space in
+                let toggle = Toggle(space.name, isOn: Binding(get: { board?.space == space.id },
+                                                              set: { _ in board?.showSpace(space.id) }))
+                    .disabled(board == nil)
+                // Only the first nine get a number key.
+                if index < 9 {
+                    toggle.keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.command, .option])
+                } else {
+                    toggle
+                }
+            }
             Divider()
         }
     }
