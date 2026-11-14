@@ -12,6 +12,8 @@ struct ImportView: View {
     @State private var selected: Set<String> = []
     @State private var loading = false
     @State private var loadedOnce = false
+    /// Spaces whose "Already on board" list is open. Closed to start with: those need no decision.
+    @State private var showingOnBoard: Set<UUID> = []
 
     private var sources: [Project] {
         store.projects.filter { $0.kind != .other && (filter == nil || $0.id == filter) }
@@ -31,6 +33,14 @@ struct ImportView: View {
         }
     }
 
+    private func fresh(_ project: Project) -> [RemoteTicket] { visible(project).filter { !onBoard($0) } }
+    private func known(_ project: Project) -> [RemoteTicket] { visible(project).filter(onBoard) }
+
+    /// Tickets not on the board yet, across the spaces shown and regardless of the filter text.
+    private var newCount: Int {
+        sources.flatMap { tickets[$0.id] ?? [] }.filter { !onBoard($0) }.count
+    }
+
     private var selectable: [RemoteTicket] {
         sources.flatMap { visible($0) }.filter { !onBoard($0) }
     }
@@ -43,6 +53,10 @@ struct ImportView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Text("Assigned to me").font(.title3.weight(.semibold))
+                if !loading, !tickets.isEmpty {
+                    Text(newCount == 0 ? "nothing new" : "\(newCount) new")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 Spacer()
                 TextField("Filter", text: $search).textFieldStyle(.roundedBorder).frame(width: 160)
                 Picker("", selection: $filter) {
@@ -75,15 +89,46 @@ struct ImportView: View {
                         } else if visible(project).isEmpty {
                             Text(search.isEmpty ? "Nothing open assigned to you." : "No results for this filter.")
                                 .foregroundStyle(.secondary)
+                        } else if fresh(project).isEmpty {
+                            Text(search.isEmpty ? "Everything assigned to you here is already on the board."
+                                                : "No new tickets for this filter.")
+                                .foregroundStyle(.secondary)
                         }
-                        ForEach(visible(project)) { ticket in
+                        ForEach(fresh(project)) { ticket in
                             row(ticket)
+                        }
+                        let onBoard = known(project)
+                        if !onBoard.isEmpty {
+                            // Open while filtering, so a ticket searched for is never hidden.
+                            let open = showingOnBoard.contains(project.id) || !search.trimmingCharacters(in: .whitespaces).isEmpty
+                            Button {
+                                showingOnBoard.formSymmetricDifference([project.id])
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2.weight(.semibold))
+                                        .rotationEffect(.degrees(open ? 90 : 0))
+                                    Text("Already on board (\(onBoard.count))")
+                                    Spacer()
+                                }
+                                .font(.callout).foregroundStyle(.secondary)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            if open {
+                                ForEach(onBoard) { ticket in
+                                    row(ticket)
+                                }
+                            }
                         }
                     } header: {
                         HStack(spacing: 6) {
                             Circle().fill(project.color).frame(width: 8, height: 8)
                             Text("\(project.name) · \(project.kind.label)")
-                            if let list = tickets[project.id] { Text("(\(list.count))") }
+                            if let list = tickets[project.id] {
+                                let new = list.filter { !onBoard($0) }.count
+                                Text(new == 0 ? "(\(list.count))" : "(\(new) new of \(list.count))")
+                            }
                         }
                     }
                 }
@@ -106,6 +151,10 @@ struct ImportView: View {
                     .primaryGlass()
             }
             .actionBar()
+            // A solid bar here: the rows under floating buttons were unreadable, and the last ones
+            // could not be reached.
+            .background(.bar)
+            .overlay(alignment: .top) { Divider() }
             }
         }
         .frame(width: 720, height: 600)
@@ -116,28 +165,36 @@ struct ImportView: View {
 
     private func row(_ ticket: RemoteTicket) -> some View {
         let exists = onBoard(ticket)
-        return HStack(alignment: .top, spacing: 10) {
-            Toggle("", isOn: Binding(
-                get: { exists || selected.contains(ticket.id) },
-                set: { on in
-                    if on { selected.insert(ticket.id) } else { selected.remove(ticket.id) }
-                }))
-                .labelsHidden()
-                .disabled(exists)
+        return HStack(alignment: .firstTextBaseline, spacing: 10) {
+            if exists {
+                // Nothing to decide for these, so no checkbox: a ticked one read as "selected".
+                Image(systemName: "checkmark")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    .frame(width: 16)
+            } else {
+                Toggle("", isOn: Binding(
+                    get: { selected.contains(ticket.id) },
+                    set: { on in
+                        if on { selected.insert(ticket.id) } else { selected.remove(ticket.id) }
+                    }))
+                    .labelsHidden()
+                    .frame(width: 16)
+            }
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+                // On the first line's baseline, so the reference stays beside the start of a long title.
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if let url = URL(string: ticket.url) {
-                        TicketLink(text: ticket.displayRef, url: url, space: store.project(ticket.projectId)).font(.callout.weight(.medium))
+                        TicketLink(text: ticket.displayRef, url: url, space: store.project(ticket.projectId))
+                            .font(.callout.weight(.medium))
+                            .fixedSize()
                     }
                     Text(ticket.title).lineLimit(2)
+                        .foregroundStyle(exists ? .secondary : .primary)
                 }
                 Text([ticket.context, ticket.status, ticket.updated].filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
-            if exists {
-                Text("already on board").font(.caption).foregroundStyle(.secondary)
-            }
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())

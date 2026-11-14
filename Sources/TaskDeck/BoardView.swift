@@ -15,6 +15,18 @@ struct BoardView: View {
     @State private var showPending = false
     /// The window's tab: "overview" (the first page) or "board". Remembered between launches.
     @AppStorage("mainTab") private var tab = "overview"
+    @State private var search = ""
+    @FocusState private var searching: Bool
+
+    /// Every word typed has to appear somewhere in the task, in any order, ignoring case and accents.
+    private func matches(_ task: TaskItem) -> Bool {
+        let words = search.split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return true }
+        let text = [task.title, task.displayRef, task.ref, task.notes, task.remoteStatus ?? "",
+                    task.remoteAssignee ?? "", store.project(task.projectId)?.name ?? ""]
+            .joined(separator: "\n")
+        return words.allSatisfy { text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+    }
 
 private func newTask() {
         editing = TaskItem(projectId: filter ?? store.projects.first?.id, status: store.defaultColumnId)
@@ -42,7 +54,6 @@ private func newTask() {
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)
-                    .keyboardShortcut("l", modifiers: .command)
                     .help("Time to push: tracked time that is not on Redmine yet (⌘L)")
                 }
             }
@@ -51,7 +62,6 @@ private func newTask() {
             ToolbarItem(placement: .primaryAction) {
                 if pendingSeconds > 0 {
                     Button { showPending = true } label: { pendingLabel }
-                        .keyboardShortcut("l", modifiers: .command)
                         .help("Time to push: tracked time that is not on Redmine yet (⌘L)")
                         .buttonStyle(.borderedProminent).tint(Theme.pending)
                 }
@@ -87,14 +97,12 @@ private func newTask() {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("New task")
-                .keyboardShortcut("n", modifiers: .command)
                 .help("New task (⌘N)")
             }
             .sharedBackgroundVisibility(.hidden)
         } else {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: newTask) { Label("New task", systemImage: "plus") }
-                    .keyboardShortcut("n", modifiers: .command)
                     .help("New task (⌘N)")
                     .buttonStyle(.borderedProminent).tint(Theme.accent)
             }
@@ -116,7 +124,7 @@ private func newTask() {
                             ForEach(store.columns) { column in
                                 ColumnView(
                                     column: column,
-                                    tasks: store.tasks(in: column.id, project: filter),
+                                    tasks: store.tasks(in: column.id, project: filter).filter(matches),
                                     onEdit: { editing = $0 },
                                     onLog: { logging = $0 },
                                     onDetails: { details = $0 },
@@ -131,19 +139,27 @@ private func newTask() {
                 }
             }
         }
-        // ⌘1 and ⌘2 switch tabs; a toolbar picker cannot carry shortcuts itself.
-        .background {
-            Group {
-                Button("Overview") { tab = "overview" }.keyboardShortcut("1", modifiers: .command)
-                Button("Board") { tab = "board" }.keyboardShortcut("2", modifiers: .command)
-            }
-            .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
-        }
+        // The menu bar carries the shortcuts, so each shows next to its command there.
+        .focusedSceneValue(\.board, BoardActions(
+            newTask: newTask,
+            fetchAssigned: { showImport = true },
+            logPending: pendingSeconds > 0 ? { showPending = true } : nil,
+            showArchive: { showArchive = true },
+            search: { searching = true },
+            show: { tab = $0 }))
         .onAppear {
             // A space deleted since last time falls back to all spaces.
             if let id = UUID(uuidString: savedSpace), store.project(id) != nil { filter = id }
         }
         .onChange(of: filter) { _, new in savedSpace = new?.uuidString ?? "" }
+        // The window keeps its name for Mission Control and the Window menu; the toolbar has no room for it.
+        .modifier(NoToolbarTitle())
+        .searchable(text: $search, prompt: "Search tasks")
+        .modifier(SearchFocus(focused: $searching))
+        // The results are cards, so typing a search from the overview moves to the board.
+        .onChange(of: search) { _, new in
+            if !new.trimmingCharacters(in: .whitespaces).isEmpty, tab == "overview" { tab = "board" }
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Picker("Space", selection: $filter) {
@@ -189,13 +205,11 @@ private func newTask() {
                     }
                     .accessibilityLabel(store.refreshingStatuses ? "Refreshing statuses" : "Refresh statuses")
                 }
-                .keyboardShortcut("r", modifiers: .command)
                 .disabled(store.refreshingStatuses)
                 .help("Refresh ticket statuses and assignees from the trackers, and agent sessions and pull requests (⌘R)")
                 Button { showImport = true } label: {
                     Label("Assigned to me", systemImage: "tray.and.arrow.down")
                 }
-                .keyboardShortcut("i", modifiers: .command)
                 .help("Fetch tickets assigned to me (⌘I)")
             }
             newTaskItem
@@ -218,6 +232,98 @@ private func newTask() {
         }
         .sheet(isPresented: $showImport) {
             ImportView().environment(store)
+        }
+    }
+}
+
+/// Lets ⌘F put the cursor in the search field. Before macOS 15 there is no way to do it, so the
+/// shortcut does nothing there and the field is reached by clicking.
+private struct SearchFocus: ViewModifier {
+    var focused: FocusState<Bool>.Binding
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.searchFocused(focused)
+        } else {
+            content
+        }
+    }
+}
+
+/// Hides the window's name in the toolbar. Before macOS 15 it stays.
+private struct NoToolbarTitle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.toolbar(removing: .title)
+        } else {
+            content
+        }
+    }
+}
+
+/// What the main window offers to the menu bar. Nil while another window is in front.
+struct BoardActions {
+    var newTask: () -> Void
+    var fetchAssigned: () -> Void
+    /// Nil when there is no time waiting to be logged.
+    var logPending: (() -> Void)?
+    var showArchive: () -> Void
+    var search: () -> Void
+    /// "overview" or "board".
+    var show: (String) -> Void
+}
+
+private struct BoardActionsKey: FocusedValueKey {
+    typealias Value = BoardActions
+}
+
+extension FocusedValues {
+    var board: BoardActions? {
+        get { self[BoardActionsKey.self] }
+        set { self[BoardActionsKey.self] = newValue }
+    }
+}
+
+struct AppCommands: Commands {
+    let store: AppStore
+    @FocusedValue(\.board) private var board
+
+    var body: some Commands {
+        // The app has one window, so "New" means a task.
+        CommandGroup(replacing: .newItem) {
+            Button("New Task") { board?.newTask() }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(board == nil)
+        }
+        CommandMenu("Tasks") {
+            Button("Fetch Tickets Assigned to Me…") { board?.fetchAssigned() }
+                .keyboardShortcut("i", modifiers: .command)
+                .disabled(board == nil)
+            Button("Log Pending Time…") { board?.logPending?() }
+                .keyboardShortcut("l", modifiers: .command)
+                .disabled(board?.logPending == nil)
+            Button("Refresh") { Task { await store.refreshEverything() } }
+                .keyboardShortcut("r", modifiers: .command)
+            Divider()
+            Button("Stop All Timers") { store.stopAll() }
+                .keyboardShortcut(".", modifiers: .command)
+            Divider()
+            Button("Show Archive") { board?.showArchive() }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
+                .disabled(board == nil)
+        }
+        CommandGroup(before: .toolbar) {
+            Button("Overview") { board?.show("overview") }
+                .keyboardShortcut("1", modifiers: .command)
+                .disabled(board == nil)
+            Button("Board") { board?.show("board") }
+                .keyboardShortcut("2", modifiers: .command)
+                .disabled(board == nil)
+            Divider()
+            Button("Search Tasks") { board?.search() }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(board == nil)
+            Divider()
         }
     }
 }
@@ -312,6 +418,13 @@ struct TaskCard: View {
                             .lineLimit(1)
                             .fixedSize()
                     }
+                } else {
+                    // A task without a ticket has nothing to put here, which left the row looking
+                    // broken. Saying so fills the place the reference would, in the same colour.
+                    Text("No ticket")
+                        .font(.caption.weight(.medium)).foregroundStyle(Theme.accent)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
                 if let status = task.remoteStatus, !status.isEmpty {
                     Text(status.prefix(1).uppercased() + status.dropFirst())
@@ -352,10 +465,14 @@ struct TaskCard: View {
                     Text(Fmt.clock(task.total(now: store.now)))
                         .font(.callout.weight(.semibold)).monospacedDigit()
                         .foregroundStyle(Theme.accent)
-                } else {
+                        .fixedSize()
+                } else if task.total(now: Date()) >= 60 {
+                    // Under a minute reads as "0m", which says nothing: leave it out.
                     Text(Fmt.short(task.total(now: Date())))
                         .font(.callout).monospacedDigit()
                         .foregroundStyle(.secondary)
+                        // Without this a crowded row squeezes the time into one character per line.
+                        .fixedSize()
                 }
                 if project?.kind == .redmine, Int(task.ref) != nil, task.unloggedSeconds >= 60 {
                     // A compact one-line chip: an "upload" arrow and the time not yet logged.
@@ -383,12 +500,15 @@ struct TaskCard: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        // The name is the one thing in this row that may shrink.
+                        .layoutPriority(-1)
                         .help("Assigned to \(assignee) in \(project?.kind.label ?? "the tracker")")
                 }
                 if let session = store.headlineSession(of: task) {
                     let status = store.status(of: session)
                     Button { Task { await Orca.reveal(session) } } label: {
                         SessionBadge(status: status, count: store.sessions(of: task).count)
+                            .fixedSize()
                             .contentShape(Capsule())
                     }
                     .buttonStyle(.plain)

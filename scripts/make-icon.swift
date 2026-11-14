@@ -1,4 +1,4 @@
-// Draws the TaskDeck icon as a 1024x1024 PNG: three bold kanban columns and a play badge.
+// Draws the TaskDeck icon as a 1024x1024 PNG: a stack of cards, the top one a task with its timer running.
 // Few, large shapes so it still reads at 16-32 px in the Dock, Finder and menu bar.
 // Usage: swift scripts/make-icon.swift out.png   — scripts/make-icon.sh builds the .icns.
 import AppKit
@@ -30,42 +30,43 @@ bg.fill()
 ctx.restoreGState()
 NSGradient(starting: topRed, ending: bottomRed)!.draw(in: bg, angle: -90)
 
-// Three solid columns of different heights, hanging from the same top line.
-let columnWidth: CGFloat = 176, gap: CGFloat = 48
-let startX = bgRect.minX + (bgRect.width - (columnWidth * 3 + gap * 2)) / 2
-let top: CGFloat = 800
-let heights: [CGFloat] = [560, 360, 250]
-for (i, height) in heights.enumerated() {
-    let rect = CGRect(x: startX + CGFloat(i) * (columnWidth + gap), y: top - height, width: columnWidth, height: height)
-    ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -6), blur: 14, color: NSColor.black.withAlphaComponent(0.20).cgColor)
-    color(0xFFFFFF, 0.97).setFill()
-    rounded(rect, 44).fill()
-    ctx.restoreGState()
-}
+// The deck: two cards behind, each narrower and fainter, so the stack reads as depth.
+color(0xFFFFFF, 0.38).setFill()
+rounded(CGRect(x: 322, y: 470, width: 380, height: 300), 56).fill()
+color(0xFFFFFF, 0.66).setFill()
+rounded(CGRect(x: 262, y: 400, width: 500, height: 300), 60).fill()
 
-// Play badge in the free corner under the short columns: the running timer.
-let badgeCenter = CGPoint(x: 668, y: 356)
-let badgeRadius: CGFloat = 158
-let badgeRect = CGRect(x: badgeCenter.x - badgeRadius, y: badgeCenter.y - badgeRadius,
-                       width: badgeRadius * 2, height: badgeRadius * 2)
+// The top card: the task being worked on.
 ctx.saveGState()
-ctx.setShadow(offset: CGSize(width: 0, height: -8), blur: 18, color: NSColor.black.withAlphaComponent(0.30).cgColor)
-color(0x2A1216).setFill()
-NSBezierPath(ovalIn: badgeRect).fill()
+ctx.setShadow(offset: CGSize(width: 0, height: -10), blur: 22, color: NSColor.black.withAlphaComponent(0.28).cgColor)
+color(0xFFFFFF).setFill()
+rounded(CGRect(x: 202, y: 232, width: 620, height: 400), 68).fill()
 ctx.restoreGState()
 
+// Play badge on the card: the running timer.
+let badgeCenter = CGPoint(x: 342, y: 432)
+let badgeRadius: CGFloat = 88
+color(0xC81E2D).setFill()
+NSBezierPath(ovalIn: CGRect(x: badgeCenter.x - badgeRadius, y: badgeCenter.y - badgeRadius,
+                            width: badgeRadius * 2, height: badgeRadius * 2)).fill()
+
 let tri = NSBezierPath()
-tri.move(to: CGPoint(x: badgeCenter.x - 44, y: badgeCenter.y + 70))
-tri.line(to: CGPoint(x: badgeCenter.x - 44, y: badgeCenter.y - 70))
-tri.line(to: CGPoint(x: badgeCenter.x + 76, y: badgeCenter.y))
+tri.move(to: CGPoint(x: badgeCenter.x - 18, y: badgeCenter.y + 36))
+tri.line(to: CGPoint(x: badgeCenter.x - 18, y: badgeCenter.y - 36))
+tri.line(to: CGPoint(x: badgeCenter.x + 44, y: badgeCenter.y))
 tri.close()
 tri.lineJoinStyle = .round
-tri.lineWidth = 22
+tri.lineWidth = 12
 NSColor.white.setFill()
 NSColor.white.setStroke()
 tri.fill()
 tri.stroke()
+
+// Two bars standing in for the task's title and detail.
+color(0x2A1216, 0.82).setFill()
+rounded(CGRect(x: 480, y: 452, width: 280, height: 48), 24).fill()
+color(0x2A1216, 0.28).setFill()
+rounded(CGRect(x: 480, y: 364, width: 190, height: 48), 24).fill()
 
 let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon.png"
 try rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
