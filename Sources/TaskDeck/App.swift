@@ -13,6 +13,7 @@ struct TaskDeckApp: App {
                 .frame(minWidth: 920, minHeight: 520)
         }
         .defaultSize(width: 1180, height: 720)
+        .commands { AppCommands(store: store) }
 
         MenuBarExtra {
             MenuBarView()

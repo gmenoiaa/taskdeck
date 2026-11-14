@@ -61,14 +61,22 @@ enum Theme {
     })
 }
 
+extension Theme {
+    /// Pale orange for time that still has to be logged, close to the not-logged chip on a card
+    /// (orange text on a faint orange fill), so the toolbar button and the chip read as the same thing.
+    static let pending = Color.orange.opacity(0.3)
+}
+
 /// A ticket number that opens the ticket in the browser, drawn in the app's red.
 /// (SwiftUI's Link ignores tint on macOS and always uses the system link blue.)
 struct TicketLink: View {
     let text: String
     let url: URL
+    /// The space the ticket belongs to: its browser and profile open the link.
+    var space: Project?
 
     var body: some View {
-        Button { NSWorkspace.shared.open(url) } label: {
+        Button { Browser.open(url, space: space) } label: {
             Text(text).foregroundStyle(Theme.accent)
         }
         .buttonStyle(.plain)

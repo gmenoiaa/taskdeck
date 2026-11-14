@@ -359,6 +359,9 @@ struct SessionsList: View {
                         }
                     }
                     Spacer(minLength: 8)
+                    if let pr = status?.prURL {
+                        Button("Open PR") { Browser.open(pr, space: store.project(store.task(taskId)?.projectId)) }
+                    }
                     Button("Open in Orca") { Task { await Orca.reveal(session) } }
                     // A worktree matched by its name would only be found again on the next refresh.
                     if !session.agent.isEmpty {

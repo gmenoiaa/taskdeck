@@ -83,7 +83,7 @@ struct ArchiveView: View {
                     }
                     if !task.displayRef.isEmpty {
                         if let url = URL(string: task.url), !task.url.isEmpty {
-                            TicketLink(text: task.displayRef, url: url).font(.caption.weight(.medium))
+                            TicketLink(text: task.displayRef, url: url, space: project).font(.caption.weight(.medium))
                         } else {
                             Text(task.displayRef).font(.caption.weight(.medium)).foregroundStyle(.secondary)
                         }
