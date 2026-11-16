@@ -14,6 +14,22 @@ final class AppStore {
     var aiInstructions = ""
     /// Propose the time-entry comment when a log screen opens, instead of only on "Generate".
     var autoLogComment = false
+    /// The agent queue: how many of its sessions may work at once, whether they run without stopping
+    /// for permission, and whether Claude is asked which repository a ticket is about.
+    var agentQueueLimit = 2
+    var agentQueueSkipPermissions = true
+    var agentQueueAskClaude = false
+    @ObservationIgnored var processingQueue = false
+    /// Which notifications are sent.
+    var notify = NotificationSettings()
+    /// What each session was doing at the last look, to notice when it stops or its pull request closes.
+    @ObservationIgnored var sessionKinds: [String: Orca.Status.Kind] = [:]
+    /// Tickets already seen as assigned to me; nil until the first look, which only takes note.
+    @ObservationIgnored var knownAssigned: Set<String>?
+    /// When the end-of-day reminder about unlogged time was last sent.
+    @ObservationIgnored var unloggedRemindedAt: Date?
+    /// How many times a running entry has been reported as running long.
+    @ObservationIgnored var longTimerReminders: [UUID: Int] = [:]
     /// Updated every second; views showing running timers read from here.
     var now = Date()
 
@@ -36,7 +52,7 @@ final class AppStore {
 
     /// When the user left (sleep, lock or display off) with a timer running; nil while they are here.
     /// Saved, so a Mac that shut down while asleep still asks on the next launch.
-    @ObservationIgnored private var awaySince: Date?
+    @ObservationIgnored private(set) var awaySince: Date?
     /// What currently keeps the user away. They are back when it is empty.
     @ObservationIgnored private var awayReasons: Set<String> = []
     @ObservationIgnored private var askingAboutAway = false
@@ -50,6 +66,12 @@ final class AppStore {
         var aiInstructions: String?
         var autoLogComment: Bool?
         var awaySince: Date?
+        var agentQueueLimit: Int?
+        var agentQueueSkipPermissions: Bool?
+        var agentQueueAskClaude: Bool?
+        var notify: NotificationSettings?
+        var knownAssigned: [String]?
+        var unloggedRemindedAt: Date?
     }
 
     static var dataURL: URL {
@@ -61,6 +83,7 @@ final class AppStore {
 
     init() {
         load()
+        Notifier.setUp()
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.now = Date()
@@ -74,14 +97,24 @@ final class AppStore {
         statusLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshRemoteStatuses()
+                await self?.noticeNewAssignments()
                 try? await Task.sleep(for: .seconds(15 * 60))
             }
         }
 
         // Agent sessions change by the minute. Only while the app is in front: nobody sees the cards otherwise.
+        // The agent queue also needs them while the app is in the background, at a slower pace.
         sessionLoop = Task { [weak self] in
+            var round = 0
             while !Task.isCancelled {
-                if NSApplication.shared.isActive { await self?.refreshSessionStatuses() }
+                round += 1
+                // In the background only what someone is waiting to hear about is worth asking Orca for.
+                if NSApplication.shared.isActive || (self?.watchesSessionsInBackground == true && round % 3 == 0) {
+                    await self?.refreshSessionStatuses()
+                    self?.noticeSessionChanges()
+                    await self?.runAgentQueue()
+                }
+                self?.noticeTimers()
                 try? await Task.sleep(for: .seconds(10))
             }
         }
@@ -235,6 +268,12 @@ final class AppStore {
             aiInstructions = snap.aiInstructions ?? ""
             autoLogComment = snap.autoLogComment ?? false
             awaySince = snap.awaySince
+            agentQueueLimit = snap.agentQueueLimit ?? 2
+            agentQueueSkipPermissions = snap.agentQueueSkipPermissions ?? true
+            agentQueueAskClaude = snap.agentQueueAskClaude ?? false
+            notify = snap.notify ?? NotificationSettings()
+            knownAssigned = snap.knownAssigned.map(Set.init)
+            unloggedRemindedAt = snap.unloggedRemindedAt
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -251,7 +290,10 @@ final class AppStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let snap = Snapshot(projects: projects, tasks: tasks, columns: columns, singleTimer: singleTimer,
                             claudeModel: claudeModel, aiInstructions: aiInstructions, autoLogComment: autoLogComment,
-                            awaySince: awaySince)
+                            awaySince: awaySince, agentQueueLimit: agentQueueLimit,
+                            agentQueueSkipPermissions: agentQueueSkipPermissions,
+                            agentQueueAskClaude: agentQueueAskClaude, notify: notify,
+                            knownAssigned: knownAssigned.map { $0.sorted() }, unloggedRemindedAt: unloggedRemindedAt)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
@@ -297,9 +339,14 @@ final class AppStore {
     func upsert(_ task: TaskItem) {
         var task = task
         if let i = tasks.firstIndex(where: { $0.id == task.id }) {
-            if tasks[i].status != task.status { task.order = nextOrder }
+            let moved = tasks[i].status != task.status
+            if moved {
+                task.order = nextOrder
+                task.queueNote = nil
+            }
             tasks[i] = task
             if role(of: task.status) == .done { closeEntries(at: i) }
+            if moved { pushStatus(of: task.id) }
         } else {
             task.order = nextOrder
             tasks.append(task)
@@ -317,8 +364,11 @@ final class AppStore {
               column(columnId) != nil else { return }
         tasks[i].status = columnId
         tasks[i].order = nextOrder
+        // Dragging a task back into the queue is how a failed start is tried again.
+        tasks[i].queueNote = nil
         if role(of: columnId) == .done { closeEntries(at: i) }
         save()
+        pushStatus(of: id)
     }
 
     func archive(column columnId: String) {
@@ -414,6 +464,7 @@ final class AppStore {
                let target = columns.first(where: { $0.role == .inProgress }) {
                 tasks[i].status = target.id
                 tasks[i].order = nextOrder
+                pushStatus(of: id)
             }
             tasks[i].archived = false
         }
@@ -501,7 +552,8 @@ final class AppStore {
         }
         guard !refreshingSessions else { return }
         let spaces = projects.filter { !$0.repoIds.isEmpty || !($0.githubOrg ?? "").isEmpty }
-        guard !spaces.isEmpty || tasks.contains(where: { !$0.archived && !($0.sessions ?? []).isEmpty }) else { return }
+        guard !spaces.isEmpty || !queueWaiting.isEmpty
+                || tasks.contains(where: { !$0.archived && !($0.sessions ?? []).isEmpty }) else { return }
         refreshingSessions = true
         defer { refreshingSessions = false }
         guard let trees = try? await Orca.worktrees() else {
@@ -627,6 +679,44 @@ final class AppStore {
     }
 
     // MARK: Tracker status
+
+    /// Tells the tracker about a task that just entered a column, when its space maps that column to
+    /// a status. Runs in the background; a refusal is reported, and the card stays where it was put.
+    func pushStatus(of id: UUID) {
+        // A refusal belongs to the column the task was in then.
+        if let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].statusNote != nil {
+            tasks[i].statusNote = nil
+            save()
+        }
+        guard let task = task(id), let project = project(task.projectId),
+              TicketFetcher.canSetStatus(project.kind), TicketFetcher.canFetch(project: project, task: task),
+              let value = project.statusByColumn?[task.status], !value.isEmpty else { return }
+        let column = task.status
+        Task {
+            do {
+                // The status of the In progress column, as a stepping stone when the tracker has no
+                // direct step to the one wanted.
+                let via = columns.first { $0.role == .inProgress }.flatMap { project.statusByColumn?[$0.id] }
+                let name = try await TicketFetcher.setStatus(project: project, ref: task.ref, url: task.url,
+                                                             to: value, via: via)
+                // Moved on while the request was out: the later move sends its own status.
+                guard let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].status == column else { return }
+                if !name.isEmpty, tasks[i].remoteStatus != name {
+                    tasks[i].remoteStatus = name
+                    save()
+                }
+            } catch {
+                // On the card as well: a notification is easy to miss, or switched off in macOS.
+                if let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].status == column {
+                    tasks[i].statusNote = error.localizedDescription
+                    save()
+                }
+                Notifier.send(title: "Ticket status not changed",
+                              body: "\(task.displayRef) \(task.title)".trimmingCharacters(in: .whitespaces)
+                                + "\n\(error.localizedDescription)")
+            }
+        }
+    }
 
     /// Records what the tracker says about a ticket: its status and who it is assigned to.
     func setRemote(_ id: UUID, from detail: TicketDetail) {

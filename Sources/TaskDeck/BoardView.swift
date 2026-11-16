@@ -156,8 +156,6 @@ private func newTask() {
         .onChange(of: filter) { _, new in savedSpace = new?.uuidString ?? "" }
         // The window keeps its name for Mission Control and the Window menu; the toolbar has no room for it.
         .modifier(NoToolbarTitle())
-        .searchable(text: $search, prompt: "Search tasks")
-        .modifier(SearchFocus(focused: $searching))
         // The results are cards, so typing a search from the overview moves to the board.
         .onChange(of: search) { _, new in
             if !new.trimmingCharacters(in: .whitespaces).isEmpty, tab == "overview" { tab = "board" }
@@ -197,6 +195,27 @@ private func newTask() {
                     TodayBreakdown().environment(store)
                 }
             }
+            // A field of its own instead of the system search item: that one always sits last in the
+            // toolbar and takes all the room left, and this one goes before the buttons at a fixed width.
+            ToolbarItem(placement: .primaryAction) {
+                HStack(spacing: 5) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search tasks", text: $search)
+                        .textFieldStyle(.plain)
+                        .focused($searching)
+                        .onExitCommand {
+                            search = ""
+                            searching = false
+                        }
+                    if !search.isEmpty {
+                        Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .help("Clear the search")
+                    }
+                }
+                .padding(.horizontal, 10)
+                .frame(width: 190)
+            }
             pendingItem
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { Task { await store.refreshEverything() } } label: {
@@ -234,20 +253,6 @@ private func newTask() {
         }
         .sheet(isPresented: $showImport) {
             ImportView().environment(store)
-        }
-    }
-}
-
-/// Lets ⌘F put the cursor in the search field. Before macOS 15 there is no way to do it, so the
-/// shortcut does nothing there and the field is reached by clicking.
-private struct SearchFocus: ViewModifier {
-    var focused: FocusState<Bool>.Binding
-
-    func body(content: Content) -> some View {
-        if #available(macOS 15.0, *) {
-            content.searchFocused(focused)
-        } else {
-            content
         }
     }
 }
@@ -350,6 +355,110 @@ struct AppCommands: Commands {
     }
 }
 
+/// Where a task stands in the agent queue: waiting its turn, waiting for the user to pick a
+/// repository, or stopped by an error.
+private struct QueueBadge: View {
+    @Environment(AppStore.self) private var store
+    let task: TaskItem
+    @State private var picking = false
+
+    var body: some View {
+        if task.queueNote == TaskItem.needsRepository {
+            Button { picking = true } label: {
+                chip("Pick repository", icon: "questionmark.folder", color: .orange)
+            }
+            .buttonStyle(.plain)
+            .help("The ticket does not say which repository it is about. Click to choose one; the agent starts after that.")
+            .popover(isPresented: $picking, arrowEdge: .bottom) {
+                QueueRepositoryPicker(task: task) { picking = false }.environment(store)
+            }
+        } else if let note = task.queueNote {
+            Button { store.retryQueued(task.id) } label: {
+                chip("Not started", icon: "exclamationmark.triangle", color: .red)
+            }
+            .buttonStyle(.plain)
+            .help("\(note) Click to try again.")
+        } else if (task.sessions ?? []).contains(where: { $0.queued == true }) {
+            // Started; the session badge next to this one says how it is going.
+            EmptyView()
+        } else {
+            chip("Queued", icon: "hourglass", color: .secondary)
+                .help("Waiting for a free slot. Up to \(store.agentQueueLimit) queued sessions work at once.")
+        }
+    }
+
+    private func chip(_ text: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 9, weight: .bold))
+            Text(text).font(.caption.weight(.medium))
+        }
+        .lineLimit(1)
+        .fixedSize()
+        .padding(.horizontal, 7).padding(.vertical, 2)
+        .foregroundStyle(color)
+        .background(color.opacity(0.15), in: Capsule())
+        .contentShape(Capsule())
+    }
+}
+
+/// Asks which repository a queued task belongs in: the space's own first, then the rest.
+private struct QueueRepositoryPicker: View {
+    @Environment(AppStore.self) private var store
+    let task: TaskItem
+    let done: () -> Void
+    @State private var repos: [Orca.Repo] = []
+    @State private var failure: String?
+    @State private var loaded = false
+
+    var body: some View {
+        let project = store.project(task.projectId)
+        let own = repos.filter { project?.owns($0) ?? false }
+        let others = repos.filter { !(project?.owns($0) ?? false) }
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Repository for \(task.displayRef.isEmpty ? "this task" : task.displayRef)").font(.headline)
+            if let failure {
+                Text(failure).font(.callout).foregroundStyle(.red)
+            } else if !loaded {
+                ProgressView().controlSize(.small)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !own.isEmpty {
+                            Text(project?.name ?? "This space").font(.caption).foregroundStyle(.secondary)
+                            ForEach(own) { row($0) }
+                        }
+                        if !others.isEmpty {
+                            Text(own.isEmpty ? "Repositories" : "Other repositories")
+                                .font(.caption).foregroundStyle(.secondary).padding(.top, own.isEmpty ? 0 : 6)
+                            ForEach(others) { row($0) }
+                        }
+                    }
+                }
+                // A scroll view has no height of its own in a popover and collapsed to one line,
+                // hiding every row; give it the height of its rows, up to a limit.
+                .frame(height: min(280, CGFloat(repos.count) * 24 + 44))
+            }
+        }
+        .padding(14)
+        .frame(width: 300)
+        .task {
+            do { repos = try await Orca.repos() } catch { failure = error.localizedDescription }
+            loaded = true
+        }
+    }
+
+    private func row(_ repo: Orca.Repo) -> some View {
+        Button {
+            store.setQueueRepository(repo.id, for: task.id)
+            done()
+        } label: {
+            Text(repo.name).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 3)
+    }
+}
+
 struct ColumnView: View {
     @Environment(AppStore.self) private var store
     let column: BoardColumn
@@ -422,6 +531,73 @@ struct TaskCard: View {
     @State private var hovering = false
     @State private var confirmDelete = false
 
+    private func footer(project: Project?, running: Bool, compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            if running {
+                // The clock counts this sitting only. The task's whole time is in the top row:
+                // this row has no room for both, and side by side they pushed the card wider
+                // than its column.
+                Text(Fmt.clock(task.currentStretch(now: store.now)))
+                    .font(.callout.weight(.semibold)).monospacedDigit()
+                    .foregroundStyle(Theme.accent)
+                    .fixedSize()
+                    .help("This sitting, since the timer was started")
+            } else if task.total(now: Date()) >= 60 {
+                // Under a minute reads as "0m", which says nothing: leave it out.
+                Text(Fmt.short(task.total(now: Date())))
+                    .font(.callout).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    // Without this a crowded row squeezes the time into one character per line.
+                    .fixedSize()
+            }
+            if project?.kind == .redmine, Int(task.ref) != nil, task.unloggedSeconds >= 60 {
+                // A compact one-line chip: an "upload" arrow and the time not yet logged.
+                Button(action: onLog) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 9, weight: .bold))
+                        Text(Fmt.short(task.unloggedSeconds))
+                            .font(.caption.weight(.medium))
+                            .monospacedDigit()
+                    }
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .foregroundStyle(Color.orange)
+                    .background(Color.orange.opacity(0.15), in: Capsule())
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("\(Fmt.short(task.unloggedSeconds)) not logged yet — click to log it to Redmine")
+            }
+            if store.role(of: task.status) == .agents {
+                QueueBadge(task: task)
+            }
+            if let session = store.headlineSession(of: task) {
+                let status = store.status(of: session)
+                Button { Task { await Orca.reveal(session) } } label: {
+                    SessionBadge(status: status, count: store.sessions(of: task).count, compact: compact)
+                        .fixedSize()
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Agent session “\(session.name)” in \(session.repoName). \(status?.detail ?? "") Click to open it in Orca.")
+            }
+            Spacer(minLength: 0)
+            Button {
+                store.toggleTimer(task.id)
+            } label: {
+                Image(systemName: running ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain)
+            .help(running ? "Pause timer" : "Start timer")
+            // The pause button stays visible while the timer runs, so it can always be stopped.
+            .opacity(hovering || running ? 1 : 0)
+        }
+    }
+
     var body: some View {
         let project = store.project(task.projectId)
         let running = task.isRunning
@@ -457,11 +633,37 @@ struct TaskCard: View {
                         .foregroundStyle(.secondary)
                         .help("Status in \(project?.kind.label ?? "the tracker")")
                 }
+                if let note = task.statusNote {
+                    Button { store.pushStatus(of: task.id) } label: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("The status was not changed in \(project?.kind.label ?? "the tracker"). \(note) Click to try again.")
+                }
+                // Next to the status: both say where the ticket stands in the tracker.
+                if let assignee = task.remoteAssignee, !assignee.isEmpty {
+                    Label(assignee, systemImage: "person")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        // The name is the one thing in this row that may shrink.
+                        .layoutPriority(-1)
+                        .help("Assigned to \(assignee) in \(project?.kind.label ?? "the tracker")")
+                }
                 Spacer(minLength: 0)
-                Button(action: onEdit) { Image(systemName: "gearshape") }
-                    .buttonStyle(.borderless)
-                    .help("Edit task")
-                    .opacity(hovering ? 1 : 0)
+                // Only while a timer runs and there is earlier time: otherwise the bottom row's
+                // figure already is the total.
+                if running, task.total(now: store.now) - task.currentStretch(now: store.now) >= 60 {
+                    Label(Fmt.short(task.total(now: store.now)), systemImage: "sum")
+                        .labelStyle(.titleAndIcon)
+                        .font(.caption).monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .help("All time tracked on this task, this sitting included")
+                }
             }
 
             Text(task.title.isEmpty ? "(untitled)" : task.title)
@@ -482,75 +684,29 @@ struct TaskCard: View {
                 .help(task.notes)
             }
 
-            HStack(spacing: 8) {
-                if running {
-                    Text(Fmt.clock(task.total(now: store.now)))
-                        .font(.callout.weight(.semibold)).monospacedDigit()
-                        .foregroundStyle(Theme.accent)
-                        .fixedSize()
-                } else if task.total(now: Date()) >= 60 {
-                    // Under a minute reads as "0m", which says nothing: leave it out.
-                    Text(Fmt.short(task.total(now: Date())))
-                        .font(.callout).monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        // Without this a crowded row squeezes the time into one character per line.
-                        .fixedSize()
-                }
-                if project?.kind == .redmine, Int(task.ref) != nil, task.unloggedSeconds >= 60 {
-                    // A compact one-line chip: an "upload" arrow and the time not yet logged.
-                    Button(action: onLog) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 9, weight: .bold))
-                            Text(Fmt.short(task.unloggedSeconds))
-                                .font(.caption.weight(.medium))
-                                .monospacedDigit()
-                        }
-                        .lineLimit(1)
-                        .fixedSize()
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .foregroundStyle(Color.orange)
-                        .background(Color.orange.opacity(0.15), in: Capsule())
-                        .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .help("\(Fmt.short(task.unloggedSeconds)) not logged yet — click to log it to Redmine")
-                }
-                if let assignee = task.remoteAssignee, !assignee.isEmpty {
-                    Label(assignee, systemImage: "person")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        // The name is the one thing in this row that may shrink.
-                        .layoutPriority(-1)
-                        .help("Assigned to \(assignee) in \(project?.kind.label ?? "the tracker")")
-                }
-                if let session = store.headlineSession(of: task) {
-                    let status = store.status(of: session)
-                    Button { Task { await Orca.reveal(session) } } label: {
-                        SessionBadge(status: status, count: store.sessions(of: task).count)
-                            .fixedSize()
-                            .contentShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Agent session “\(session.name)” in \(session.repoName). \(status?.detail ?? "") Click to open it in Orca.")
-                }
-                Spacer(minLength: 0)
-                Button {
-                    store.toggleTimer(task.id)
-                } label: {
-                    Image(systemName: running ? "pause.circle.fill" : "play.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(Theme.accent)
-                }
-                .buttonStyle(.plain)
-                .help(running ? "Pause timer" : "Start timer")
-                // The pause button stays visible while the timer runs, so it can always be stopped.
-                .opacity(hovering || running ? 1 : 0)
+            // The full row when it fits; in a narrow column the session badge shrinks to its icon.
+            // A row wider than the card is not cut off but pushes the card out of its column.
+            ViewThatFits(in: .horizontal) {
+                footer(project: project, running: running, compact: false)
+                footer(project: project, running: running, compact: true)
             }
         }
         .padding(10)
+        // The edit button floats over the corner while the pointer is on the card. A place of its
+        // own in the top row cost room that row does not have in a narrow column.
+        .overlay(alignment: .topTrailing) {
+            if hovering {
+                Button(action: onEdit) {
+                    Image(systemName: "gearshape")
+                        .font(.caption)
+                        .padding(5)
+                        .background(.regularMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Edit task")
+                .padding(5)
+            }
+        }
         // Running timer: a faint red wash over the card.
         .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
             .fill(Theme.accent.opacity(running ? 0.13 : 0)))

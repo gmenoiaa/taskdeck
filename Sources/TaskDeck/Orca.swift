@@ -19,6 +19,8 @@ struct AgentSession: Identifiable, Codable, Hashable {
     /// The `gh` account the agent was started with; nil for gh's active account.
     var githubAccount: String?
     var startedAt = Date()
+    /// True when the agent queue started it, with nobody watching. Optional so older files load.
+    var queued: Bool?
 }
 
 /// Talks to Orca through its command-line tool. Every call asks for JSON and runs off the main thread.
@@ -105,10 +107,13 @@ enum Orca {
     /// `claudeHome` (Claude only) is the directory Claude Code keeps its settings, MCP servers and logs in.
     /// `githubAccount` is the `gh` user the agent's `gh` commands run as; empty means gh's active account.
     static func start(repo: Repo, name: String, agent: String, prompt: String, comment: String,
-                      claudeHome: String? = nil, githubAccount: String? = nil) async throws -> AgentSession {
+                      claudeHome: String? = nil, githubAccount: String? = nil,
+                      skipPermissions: Bool = false) async throws -> AgentSession {
         let home = agent == "claude" ? (claudeHome?.trimmingCharacters(in: .whitespaces) ?? "") : ""
         let account = githubAccount?.trimmingCharacters(in: .whitespaces) ?? ""
-        let customLaunch = !home.isEmpty || !account.isEmpty
+        // Orca's launcher takes no flags either, so a session that must not stop to ask is typed too.
+        let unattended = skipPermissions && agent == "claude"
+        let customLaunch = !home.isEmpty || !account.isEmpty || unattended
 
         var args = ["worktree", "create", "--repo", "id:\(repo.id)", "--name", name, "--no-parent"]
         // Orca's own launcher cannot set environment variables, so when the session needs any the
@@ -130,7 +135,8 @@ enum Orca {
         guard let path = session.path else {
             throw Failure.failed("Orca created the worktree but did not say where, so the agent was not started in it.")
         }
-        let command = try launchCommand(agent: agent, home: home, account: account, prompt: prompt)
+        let command = try launchCommand(agent: agent, home: home, account: account, prompt: prompt,
+                                        flags: unattended ? " --dangerously-skip-permissions" : "")
         let title = agents.first { $0.id == agent }?.label ?? agent
         let terminal = try await run(["terminal", "create", "--worktree", "path:\(path)",
                                       "--title", title, "--command", command])
@@ -193,7 +199,8 @@ enum Orca {
     /// The shell line that starts the agent with its environment and the prompt as first message.
     /// The prompt travels in a file: ticket text has quotes and newlines that a typed command would mangle.
     /// The line reads the file into a variable and deletes it before the agent starts.
-    private static func launchCommand(agent: String, home: String, account: String, prompt: String) throws -> String {
+    private static func launchCommand(agent: String, home: String, account: String, prompt: String,
+                                      flags: String = "") throws -> String {
         var environment = ""
         if !home.isEmpty {
             guard let directory = resolvedHome(home) else {
@@ -207,13 +214,13 @@ enum Orca {
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         let f = shellQuoted(file.path)
         let read = "P=\"$(cat \(f))\"; rm -f \(f); "
-        guard !account.isEmpty else { return read + "\(environment)\(agent) \"$P\"" }
+        guard !account.isEmpty else { return read + "\(environment)\(agent)\(flags) \"$P\"" }
         // The token is read from gh's own keyring in the terminal, so the app never holds it. Without a
         // token the agent is not started: gh would silently fall back to the active account.
         let user = shellQuoted(account)
         let missing = shellQuoted("TaskDeck: gh has no token for \(account). Run: gh auth login")
         return read + "T=\"$(gh auth token --user \(user))\"; "
-            + "if [ -z \"$T\" ]; then echo \(missing); else GH_TOKEN=\"$T\" \(environment)\(agent) \"$P\"; fi"
+            + "if [ -z \"$T\" ]; then echo \(missing); else GH_TOKEN=\"$T\" \(environment)\(agent)\(flags) \"$P\"; fi"
     }
 
     private static func shellQuoted(_ text: String) -> String {
@@ -264,6 +271,8 @@ enum Orca {
         /// The end of the agent's last answer, once it stopped.
         var lastMessage: String?
         var prNumber: Int?
+        /// An open pull request that is still marked as a draft.
+        var prDraft = false
         /// The pull request's page on GitHub, when the repository's address is known.
         var prURL: URL?
 
@@ -273,7 +282,7 @@ enum Orca {
             switch kind {
             case .working: return "Working"
             case .yourTurn: return "Your turn"
-            case .prOpen: return prNumber.map { "PR #\($0)" } ?? "PR open"
+            case .prOpen: return (prDraft ? "Draft " : "") + (prNumber.map { "PR #\($0)" } ?? "PR open")
             case .prMerged: return "Merged"
             case .prClosed: return "PR closed"
             case .idle: return "Idle"
@@ -285,7 +294,7 @@ enum Orca {
             switch kind {
             case .working: return tool.map { "The agent is working (\($0))." } ?? "The agent is working."
             case .yourTurn: return "The agent stopped and you have not looked at it yet."
-            case .prOpen: return "A pull request is open for this worktree."
+            case .prOpen: return prDraft ? "A draft pull request is open for this worktree." : "A pull request is open for this worktree."
             case .prMerged: return "The pull request was merged."
             case .prClosed: return "The pull request was closed without merging."
             case .idle: return "No agent is working here."
@@ -354,13 +363,57 @@ enum Orca {
             return Status(kind: .yourTurn, lastMessage: message, prNumber: prNumber)
         }
         let kind: Status.Kind
+        // Orca reports a draft as a state of its own; it is an open pull request all the same.
+        let draft = pr?["state"] as? String == "draft"
         switch pr?["state"] as? String {
-        case "open": kind = .prOpen
+        case "open", "draft": kind = .prOpen
         case "merged": kind = .prMerged
         case "closed": kind = .prClosed
         default: kind = .idle
         }
-        return Status(kind: kind, lastMessage: message, prNumber: prNumber)
+        return Status(kind: kind, lastMessage: message, prNumber: prNumber, prDraft: draft)
+    }
+
+    // MARK: Which repository
+
+    /// The repository a ticket is about, when its text says so: the repository's name or its
+    /// "owner/name" appears in the title, description or fields. Nil when none or several do.
+    static func inferRepository(task: TaskItem, detail: TicketDetail?, among candidates: [Repo]) -> Repo? {
+        if candidates.count == 1 { return candidates[0] }
+        // A GitHub reference names its repository outright: "unify#10049".
+        if let hash = task.ref.firstIndex(of: "#") {
+            let name = task.ref[..<hash]
+            if let exact = candidates.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) { return exact }
+        }
+        var text = [task.title, task.url]
+        if let detail {
+            text += [detail.subject, detail.description] + detail.meta.map(\.1)
+        }
+        let hay = text.joined(separator: "\n")
+        var hits = candidates.filter { repo in
+            if let slug = repo.slug, hay.range(of: slug, options: .caseInsensitive) != nil { return true }
+            return containsWord(repo.name, in: hay)
+        }
+        // "unify" is also found inside "unify-connectors"; the longer name is the one meant.
+        hits = hits.filter { hit in
+            !hits.contains { $0.id != hit.id && $0.name.range(of: hit.name, options: .caseInsensitive) != nil }
+        }
+        return hits.count == 1 ? hits[0] : nil
+    }
+
+    /// Whether `word` stands in `text` with no letter or digit on either side.
+    private static func containsWord(_ word: String, in text: String) -> Bool {
+        // Shorter than this, a name matches by accident ("api", "web").
+        guard word.count >= 4 else { return false }
+        var from = text.startIndex
+        while let found = text.range(of: word, options: .caseInsensitive, range: from..<text.endIndex) {
+            let before = found.lowerBound == text.startIndex ? nil : text[text.index(before: found.lowerBound)]
+            let after = found.upperBound == text.endIndex ? nil : text[found.upperBound]
+            if !(before.map { $0.isLetter || $0.isNumber } ?? false),
+               !(after.map { $0.isLetter || $0.isNumber } ?? false) { return true }
+            from = found.upperBound
+        }
+        return false
     }
 
     // MARK: Naming and prompt
@@ -456,9 +509,18 @@ enum Orca {
         throw Failure.failed(message(reply: reply, status: status, out: out, err: err))
     }
 
+    /// What a finished command left behind, filled in from three queues at once.
+    private final class Collected: @unchecked Sendable {
+        var out = Data()
+        var err = Data()
+    }
+
     /// Runs a command off the main thread and returns its exit status and output.
+    /// The end is learnt from the process's termination handler. `waitUntilExit` was used before and
+    /// sometimes never returned for a command that had already finished; every later refresh then
+    /// waited behind it, and the cards kept showing what was true at that moment.
     private static func exec(_ executable: String, _ args: [String]) async throws -> (status: Int32, out: Data, err: Data) {
-        try await Task.detached(priority: .userInitiated) {
+        try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = args
@@ -468,14 +530,39 @@ enum Orca {
             process.standardOutput = outPipe
             process.standardError = errPipe
             process.standardInput = FileHandle.nullDevice
-            try process.run()
+
+            let collected = Collected()
+            let finished = DispatchGroup()
+            finished.enter()
+            process.terminationHandler = { _ in finished.leave() }
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                continuation.resume(throwing: error)
+                return
+            }
             // Both pipes are drained while the command runs; a full pipe would block it forever.
-            let errRead = Task.detached { errPipe.fileHandleForReading.readDataToEndOfFile() }
-            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = await errRead.value
-            process.waitUntilExit()
-            return (process.terminationStatus, outData, errData)
-        }.value
+            let queue = DispatchQueue.global(qos: .userInitiated)
+            finished.enter()
+            queue.async {
+                collected.out = outPipe.fileHandleForReading.readDataToEndOfFile()
+                finished.leave()
+            }
+            finished.enter()
+            queue.async {
+                collected.err = errPipe.fileHandleForReading.readDataToEndOfFile()
+                finished.leave()
+            }
+            // A command that hangs must not hold up everything after it. Creating a worktree is the
+            // slowest thing asked of Orca, and it takes seconds.
+            queue.asyncAfter(deadline: .now() + 180) {
+                if process.isRunning { process.terminate() }
+            }
+            finished.notify(queue: queue) {
+                continuation.resume(returning: (process.terminationStatus, collected.out, collected.err))
+            }
+        }
     }
 
     private static func message(reply: [String: Any]?, status: Int32, out: Data, err: Data) -> String {

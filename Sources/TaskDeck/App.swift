@@ -41,7 +41,8 @@ struct MenuBarLabel: View {
         HStack(spacing: 4) {
             Image(systemName: running.isEmpty ? "timer" : "record.circle")
             if running.count == 1, let task = running.first {
-                Text("\(task.displayRef) \(Fmt.hm(task.total(now: store.now)))".trimmingCharacters(in: .whitespaces))
+                // This sitting, like the card's clock and the Dock badge; not the task's whole time.
+                Text("\(task.displayRef) \(Fmt.hm(task.currentStretch(now: store.now)))".trimmingCharacters(in: .whitespaces))
                     .monospacedDigit()
             } else if running.count > 1 {
                 Text("\(running.count) timers")

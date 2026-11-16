@@ -294,6 +294,8 @@ struct SessionBadge: View {
     let status: Orca.Status?
     /// How many sessions the task has; shown when there is no status to show instead.
     let count: Int
+    /// Icon only, in the status colour, for a card with no room for the word.
+    var compact = false
 
     private var color: Color {
         switch status?.kind {
@@ -309,7 +311,9 @@ struct SessionBadge: View {
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: "terminal").font(.system(size: 9, weight: .bold))
-            if let status {
+            if compact {
+                EmptyView()
+            } else if let status {
                 Text(status.label).font(.caption.weight(.medium))
             } else if count > 1 {
                 Text("\(count)").font(.caption.weight(.medium)).monospacedDigit()

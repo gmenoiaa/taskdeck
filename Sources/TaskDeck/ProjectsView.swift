@@ -67,6 +67,8 @@ struct ProjectEditor: View {
     @State private var testing = false
     @State private var testResult: String?
     @State private var testOK = false
+    @State private var statuses: [TrackerStatus] = []
+    @State private var statusesFailure: String?
 
     init(project: Project) {
         _project = State(initialValue: project)
@@ -124,6 +126,42 @@ struct ProjectEditor: View {
                              ? "Optional for public repositories. The token is stored in the macOS Keychain."
                              : "The key is stored in the macOS Keychain, not in the data file.")
                             .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if TicketFetcher.canSetStatus(project.kind) {
+                    Section("Ticket status when a task moves") {
+                        ForEach(store.columns) { column in
+                            let chosen = project.statusByColumn?[column.id] ?? ""
+                            Picker(column.displayName, selection: Binding(
+                                get: { chosen },
+                                set: { value in
+                                    var map = project.statusByColumn ?? [:]
+                                    map[column.id] = value.isEmpty ? nil : value
+                                    project.statusByColumn = map.isEmpty ? nil : map
+                                })) {
+                                Text("Don't change").tag("")
+                                ForEach(statuses) { Text($0.name).tag($0.id) }
+                                // A saved choice stays visible while the list loads or cannot be read.
+                                if !chosen.isEmpty, !statuses.contains(where: { $0.id == chosen }) {
+                                    Text(project.kind == .jira ? chosen : "Status \(chosen)").tag(chosen)
+                                }
+                            }
+                        }
+                        if let statusesFailure {
+                            Text("Could not read the statuses: \(statusesFailure) Save the space with its credentials first, then open it again.")
+                                .font(.caption).foregroundStyle(.red)
+                        }
+                        Text("Moving a card into a column sets the ticket to that status in \(project.kind.label). This also happens when a timer or the agent queue moves the card. When \(project.kind.label) has no direct step to a status, the ticket is taken through the In Progress column's status first. If it still refuses, the card shows a warning and stays where you put it.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    .task(id: project.kind) {
+                        do {
+                            statuses = try await TicketFetcher.statuses(project: project)
+                            statusesFailure = nil
+                        } catch {
+                            statuses = []
+                            statusesFailure = error.localizedDescription
+                        }
                     }
                 }
                 if Browser.kinds.contains(where: \.isInstalled) {

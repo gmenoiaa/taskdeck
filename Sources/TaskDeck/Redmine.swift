@@ -168,6 +168,8 @@ struct RedmineClient {
         let updated_on: String?
         let due_date: String?
         let journals: [Journal]?
+        /// The statuses the workflow lets the key's owner move this ticket to (Redmine 5 and later).
+        let allowed_statuses: [Named]?
     }
 
     struct SpentEntry: Decodable, Identifiable {
@@ -180,7 +182,7 @@ struct RedmineClient {
 
     func issue(id: Int) async throws -> IssueDetail {
         struct Wrapper: Decodable { let issue: IssueDetail }
-        let data = try await send("/issues/\(id).json?include=journals")
+        let data = try await send("/issues/\(id).json?include=journals,allowed_statuses")
         return try JSONDecoder().decode(Wrapper.self, from: data).issue
     }
 

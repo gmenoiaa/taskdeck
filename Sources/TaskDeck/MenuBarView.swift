@@ -102,7 +102,7 @@ struct MenuTaskRow: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 4)
-            Text(running ? Fmt.clock(task.total(now: store.now)) : Fmt.short(task.total(now: Date())))
+            Text(running ? Fmt.clock(task.currentStretch(now: store.now)) : Fmt.short(task.total(now: Date())))
                 .font(.callout).monospacedDigit()
                 .foregroundStyle(running ? Theme.accent : Color.secondary)
             Button {

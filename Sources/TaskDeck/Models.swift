@@ -35,12 +35,13 @@ enum TrackerKind: String, Codable, CaseIterable, Identifiable {
 
 /// What a board column means for timers, archiving and the menu bar suggestions.
 enum ColumnRole: String, Codable, CaseIterable, Identifiable {
-    case backlog, inProgress, normal, watching, done
+    case backlog, agents, inProgress, normal, watching, done
     var id: String { rawValue }
 
     var label: String {
         switch self {
         case .backlog: return "Not started"
+        case .agents: return "For agents"
         case .inProgress: return "In progress"
         case .normal: return "Other work"
         case .watching: return "Watching"
@@ -51,6 +52,7 @@ enum ColumnRole: String, Codable, CaseIterable, Identifiable {
     var hint: String {
         switch self {
         case .backlog: return "Starting a timer moves the task to the In progress column."
+        case .agents: return "A task dragged here is started as an agent session in Orca, a few at a time, and then moves to In progress."
         case .inProgress: return "Where tasks go when you start a timer on a not-started or done task."
         case .normal: return "A normal work step, such as review or testing."
         case .watching: return "Tasks you only follow. Not suggested in the menu bar; timers leave them here."
@@ -103,6 +105,9 @@ struct Project: Identifiable, Codable, Hashable {
     /// The first message for this space's agent sessions, with placeholders such as "{ref}" (see
     /// `Orca.placeholders`). Empty or nil means the app's standard message.
     var sessionPrompt: String?
+    /// The tracker status a ticket gets when its task enters a column, by column id. A column that
+    /// is not here changes nothing. The value is a `TrackerStatus.id`.
+    var statusByColumn: [String: String]?
     /// The browser this space's links open in ("chrome", "edge"); nil for the system default.
     var browser: String?
     /// The browser profile's folder ("Default", "Profile 1"); nil for the browser's last used profile.
@@ -157,9 +162,23 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var explanation: String?
     /// Agent sessions started in Orca for this task, oldest first. Optional so older files still load.
     var sessions: [AgentSession]?
+    /// The Orca repository chosen for this task when the queue could not tell which one it is about.
+    var queueRepoId: String?
+    /// Why the agent queue is not starting this task: `needsRepository`, or the error it met.
+    /// Nil while the task simply waits its turn.
+    var queueNote: String?
+    static let needsRepository = "repository"
+    /// Why the tracker refused the status of the column the task was last moved to; nil when it
+    /// took it, or when the column changes nothing.
+    var statusNote: String?
     var order: Double = 0
 
     var isRunning: Bool { entries.contains { $0.end == nil } }
+
+    /// How long the running timer has been going since it was last started; 0 when none runs.
+    func currentStretch(now: Date) -> TimeInterval {
+        entries.first { $0.end == nil }?.duration(now: now) ?? 0
+    }
 
     func total(now: Date) -> TimeInterval {
         entries.reduce(0) { $0 + $1.duration(now: now) }

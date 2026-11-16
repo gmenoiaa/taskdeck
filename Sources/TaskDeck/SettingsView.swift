@@ -105,6 +105,52 @@ private struct GeneralSettings: View {
             Section("Timers") {
                 Toggle("Only one timer at a time", isOn: $store.singleTimer)
             }
+            Section("Notifications") {
+                Toggle("Agent sessions", isOn: $store.notify.sessions)
+                Text("When an agent stops and it is your turn, when it opens a pull request, and when the agent queue cannot start a task or needs you to pick a repository.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Pull request merged or closed", isOn: $store.notify.pullRequests)
+                Toggle("Ticket assigned to me", isOn: $store.notify.assigned)
+                Text("Checked every 15 minutes while the app is open. Tickets already on the board are not reported.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Time not logged yet", isOn: $store.notify.unlogged)
+                if store.notify.unlogged {
+                    Picker("Remind me from", selection: $store.notify.unloggedHour) {
+                        ForEach(12..<24, id: \.self) { Text("\($0):00").tag($0) }
+                    }
+                }
+                Toggle("Timer running for a long time", isOn: $store.notify.longTimer)
+                if store.notify.longTimer {
+                    Picker("Remind me every", selection: $store.notify.longTimerHours) {
+                        ForEach(1...6, id: \.self) { Text($0 == 1 ? "1 hour" : "\($0) hours").tag($0) }
+                    }
+                }
+                Button("Send a test notification") {
+                    Notifier.send(title: "TaskDeck", body: "Notifications are working.")
+                }
+                Text("If nothing appears, allow TaskDeck in System Settings → Notifications.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if Orca.isInstalled {
+                Section("Agent queue") {
+                    if store.queueColumn == nil {
+                        LabeledContent("Queue column") {
+                            Button("Add a “For agents” column") { store.addQueueColumn() }
+                        }
+                        Text("A task dragged into that column is started as an agent session in Orca, without the Start session sheet, and then moves to In progress. Nothing starts by itself until the column exists.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Stepper("Sessions working at once: \(store.agentQueueLimit)",
+                                value: $store.agentQueueLimit, in: 1...6)
+                        Toggle("Run without asking for permission", isOn: $store.agentQueueSkipPermissions)
+                        Text("On: the agent is started with Claude Code's --dangerously-skip-permissions, so it edits files and runs commands in the checkout without stopping to ask. The first message contains ticket text written by other people. Off: it stops at the first permission prompt and waits for you in Orca.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Toggle("Ask Claude which repository a ticket is about", isOn: $store.agentQueueAskClaude)
+                        Text("The queue first looks for a repository's name in the ticket. On: when that finds none, the ticket's text is sent to the Claude API with the names of the space's repositories. Either way, when it stays unclear the card asks you to pick one. Needs the API key in the AI tab.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
             Section("Data") {
                 LabeledContent("Tasks and tracked time") {
                     Button("Show data file in Finder") {
@@ -117,6 +163,10 @@ private struct GeneralSettings: View {
         .frame(width: 560)
         .fixedSize(horizontal: false, vertical: true)
         .onChange(of: store.singleTimer) { store.save() }
+        .onChange(of: store.notify) { store.save() }
+        .onChange(of: store.agentQueueLimit) { store.save() }
+        .onChange(of: store.agentQueueSkipPermissions) { store.save() }
+        .onChange(of: store.agentQueueAskClaude) { store.save() }
     }
 }
 
@@ -130,7 +180,7 @@ private struct AISettings: View {
         Form {
             Section("Claude") {
                 SecureField("API key", text: $claudeKey, prompt: Text("sk-ant-…"))
-                Text("Used by “Explain” in the ticket details. Stored in the macOS Keychain. The ticket's text is sent to the Claude API only when you click Explain.")
+                Text("Used by “Explain” in the ticket details. Stored in the macOS Keychain. The ticket's text is sent to the Claude API only when you click Explain, or by the agent queue if you turned that on in General.")
                     .font(.caption).foregroundStyle(.secondary)
                 Picker("Model", selection: $store.claudeModel) {
                     ForEach(Claude.models) { Text($0.name).tag($0.id) }
