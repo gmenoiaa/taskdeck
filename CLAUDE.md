@@ -16,8 +16,9 @@ the Liquid Glass design is lost), signs it, copies it to `/Applications` and rel
 
 Things to know:
 
-- `--install` kills the running app first, so **any running timer is stopped** (quitting calls
-  `stopAll`). Say so when you install while the user may have a timer on.
+- `--install` ends the running app with `pkill`, which skips the quit handler, so **a running
+  timer keeps running** across the install and counts the few seconds the app was closed. Only a
+  normal Quit stops timers (`willTerminate` calls `stopAll`).
 - Signing uses the first "Apple Development" or "Developer ID Application" certificate found, so
   the Keychain's "Always Allow" survives rebuilds. Without a certificate it falls back to ad-hoc
   and macOS asks for the Keychain password after every build. Override with `CODESIGN_IDENTITY`.
