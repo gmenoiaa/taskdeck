@@ -7,13 +7,72 @@ struct ImportView: View {
 
     @State private var filter: UUID?
     @State private var search = ""
-    @State private var tickets: [UUID: [RemoteTicket]] = [:]
-    @State private var errors: [UUID: String] = [:]
     @State private var selected: Set<String> = []
-    @State private var loading = false
-    @State private var loadedOnce = false
+    /// Spaces whose "Ignored" list is open.
+    @State private var showingIgnored: Set<UUID> = []
     /// Spaces whose "Already on board" list is open. Closed to start with: those need no decision.
     @State private var showingOnBoard: Set<UUID> = []
+    /// The row the keyboard is on.
+    @State private var cursor: String?
+
+    /// The rows on screen, top to bottom, as the list draws them.
+    private var rows: [RemoteTicket] {
+        let filtering = !search.trimmingCharacters(in: .whitespaces).isEmpty
+        return sources.flatMap { project -> [RemoteTicket] in
+            fresh(project)
+                + (filtering || showingOnBoard.contains(project.id) ? known(project) : [])
+                + (filtering || showingIgnored.contains(project.id) ? setAside(project) : [])
+        }
+    }
+
+    /// Up and down move along the rows, also while the filter field has the keyboard. The rest
+    /// needs the field empty or elsewhere, so a space or a letter typed into it stays text.
+    private func key(_ event: NSEvent, inFilter: Bool) -> Bool {
+        guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return false }
+        let rows = rows
+        let at = rows.firstIndex { $0.id == cursor }
+        switch event.keyCode {
+        // Tab goes from the filter to the rows and back. macOS alone would leave it in the
+        // field: it only moves Tab between text fields, and this sheet has one.
+        case 48:
+            if inFilter {
+                event.window?.makeFirstResponder(nil)
+                if at == nil { cursor = rows.first?.id }
+            } else {
+                focusToolbarSearch(placeholder: "Filter")
+            }
+            return true
+        case 125:
+            guard !rows.isEmpty else { return false }
+            cursor = rows[min((at ?? -1) + 1, rows.count - 1)].id
+            return true
+        case 126:
+            guard !rows.isEmpty else { return false }
+            cursor = rows[max((at ?? 1) - 1, 0)].id
+            return true
+        default: break
+        }
+        guard let at, !(inFilter && !search.isEmpty) else { return false }
+        let ticket = rows[at]
+        let exists = onBoard(ticket), aside = ignored(ticket)
+        switch event.keyCode {
+        case 49:
+            guard !exists, !aside else { return false }
+            selected.formSymmetricDifference([ticket.id])
+        case 36, 76:
+            // With nothing ticked, Return adds the row the keyboard is on.
+            guard chosen.isEmpty, !exists, !aside else { return false }
+            selected.insert(ticket.id)
+            addChosen()
+        default:
+            guard !inFilter, event.charactersIgnoringModifiers?.lowercased() == "i", !exists else { return false }
+            selected.remove(ticket.id)
+            store.setIgnored(ticket, !aside)
+            // Stay in place: the next row moves up under the keyboard.
+            cursor = rows.indices.contains(at + 1) ? rows[at + 1].id : (at > 0 ? rows[at - 1].id : nil)
+        }
+        return true
+    }
 
     private var sources: [Project] {
         store.projects.filter { $0.kind != .other && (filter == nil || $0.id == filter) }
@@ -33,27 +92,36 @@ struct ImportView: View {
         }
     }
 
-    private func fresh(_ project: Project) -> [RemoteTicket] { visible(project).filter { !onBoard($0) } }
+    // The last answer lives in the store, so the screen opens with it and is repainted when the
+    // trackers answer again.
+    private var tickets: [UUID: [RemoteTicket]] { store.assignedTickets }
+    private var errors: [UUID: String] { store.assignedErrors }
+    private var loading: Bool { store.refreshingAssigned }
+
+    private func ignored(_ t: RemoteTicket) -> Bool { store.ignoredAssigned.contains(t.id) }
+    private func fresh(_ project: Project) -> [RemoteTicket] { visible(project).filter { !onBoard($0) && !ignored($0) } }
     private func known(_ project: Project) -> [RemoteTicket] { visible(project).filter(onBoard) }
+    /// Ignored and not on the board: one put on the board by hand is simply on the board.
+    private func setAside(_ project: Project) -> [RemoteTicket] { visible(project).filter { ignored($0) && !onBoard($0) } }
 
     /// Tickets not on the board yet, across the spaces shown and regardless of the filter text.
     private var newCount: Int {
-        sources.flatMap { tickets[$0.id] ?? [] }.filter { !onBoard($0) }.count
+        sources.flatMap { tickets[$0.id] ?? [] }.filter { !onBoard($0) && !ignored($0) }.count
     }
 
     private var selectable: [RemoteTicket] {
-        sources.flatMap { visible($0) }.filter { !onBoard($0) }
+        sources.flatMap { visible($0) }.filter { !onBoard($0) && !ignored($0) }
     }
 
     private var chosen: [RemoteTicket] {
-        sources.flatMap { tickets[$0.id] ?? [] }.filter { selected.contains($0.id) && !onBoard($0) }
+        sources.flatMap { tickets[$0.id] ?? [] }.filter { selected.contains($0.id) && !onBoard($0) && !ignored($0) }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Text("Assigned to me").font(.title3.weight(.semibold))
-                if !loading, !tickets.isEmpty {
+                if !tickets.isEmpty {
                     Text(newCount == 0 ? "nothing new" : "\(newCount) new")
                         .font(.callout).foregroundStyle(.secondary)
                 }
@@ -66,7 +134,7 @@ struct ImportView: View {
                     }
                 }
                 .labelsHidden().frame(width: 170)
-                Button { Task { await load() } } label: {
+                Button { Task { await store.refreshAssigned() } } label: {
                     // The spinner takes the icon's place while loading.
                     ZStack {
                         Image(systemName: "arrow.clockwise").opacity(loading ? 0 : 1)
@@ -78,19 +146,24 @@ struct ImportView: View {
             .padding(14)
             Divider()
 
+            ScrollViewReader { list in
             List {
                 ForEach(sources) { project in
                     Section {
                         if let error = errors[project.id] {
+                            // The list under it, if any, is the last one that could be read.
                             Label(error, systemImage: "exclamationmark.triangle")
                                 .font(.callout).foregroundStyle(.red)
-                        } else if tickets[project.id] == nil {
-                            HStack { ProgressView().controlSize(.small); Text("Loading…").foregroundStyle(.secondary) }
+                        }
+                        if tickets[project.id] == nil {
+                            if errors[project.id] == nil {
+                                HStack { ProgressView().controlSize(.small); Text("Loading…").foregroundStyle(.secondary) }
+                            }
                         } else if visible(project).isEmpty {
                             Text(search.isEmpty ? "Nothing open assigned to you." : "No results for this filter.")
                                 .foregroundStyle(.secondary)
                         } else if fresh(project).isEmpty {
-                            Text(search.isEmpty ? "Everything assigned to you here is already on the board."
+                            Text(search.isEmpty ? "Nothing new: everything assigned to you here is on the board or ignored."
                                                 : "No new tickets for this filter.")
                                 .foregroundStyle(.secondary)
                         }
@@ -121,12 +194,35 @@ struct ImportView: View {
                                 }
                             }
                         }
+                        let aside = setAside(project)
+                        if !aside.isEmpty {
+                            let open = showingIgnored.contains(project.id) || !search.trimmingCharacters(in: .whitespaces).isEmpty
+                            Button {
+                                showingIgnored.formSymmetricDifference([project.id])
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2.weight(.semibold))
+                                        .rotationEffect(.degrees(open ? 90 : 0))
+                                    Text("Ignored (\(aside.count))")
+                                    Spacer()
+                                }
+                                .font(.callout).foregroundStyle(.secondary)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            if open {
+                                ForEach(aside) { ticket in
+                                    row(ticket)
+                                }
+                            }
+                        }
                     } header: {
                         HStack(spacing: 6) {
                             Circle().fill(project.color).frame(width: 8, height: 8)
                             Text("\(project.name) · \(project.kind.label)")
                             if let list = tickets[project.id] {
-                                let new = list.filter { !onBoard($0) }.count
+                                let new = list.filter { !onBoard($0) && !ignored($0) }.count
                                 Text(new == 0 ? "(\(list.count))" : "(\(new) new of \(list.count))")
                             }
                         }
@@ -137,6 +233,9 @@ struct ImportView: View {
                 }
             }
             .softScrollEdges()
+            .onChange(of: cursor) { _, new in
+                if let new { list.scrollTo(new) }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack {
                 Button("Select all") { selected.formUnion(selectable.map(\.id)) }
@@ -156,17 +255,23 @@ struct ImportView: View {
             .background(.bar)
             .overlay(alignment: .top) { Divider() }
             }
+            }
         }
         .frame(width: 720, height: 600)
-        .task {
-            if !loadedOnce { await load() }
-        }
+        .background(KeyCatcher(field: "Filter", handler: { key($0, inFilter: $1) }))
+        // Not tied to the sheet's life: closing it mid-way would cancel the requests and show them as errors.
+        .onAppear { Task { await store.refreshAssigned() } }
     }
 
     private func row(_ ticket: RemoteTicket) -> some View {
         let exists = onBoard(ticket)
+        let aside = !exists && ignored(ticket)
         return HStack(alignment: .firstTextBaseline, spacing: 10) {
-            if exists {
+            if aside {
+                Image(systemName: "eye.slash")
+                    .font(.caption).foregroundStyle(.tertiary)
+                    .frame(width: 16)
+            } else if exists {
                 // Nothing to decide for these, so no checkbox: a ticked one read as "selected".
                 Image(systemName: "checkmark")
                     .font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
@@ -189,17 +294,32 @@ struct ImportView: View {
                             .fixedSize()
                     }
                     Text(ticket.title).lineLimit(2)
-                        .foregroundStyle(exists ? .secondary : .primary)
+                        .foregroundStyle(exists || aside ? .secondary : .primary)
                 }
-                Text([ticket.context, ticket.status, ticket.updated].filter { !$0.isEmpty }.joined(separator: " · "))
+                Text([ticket.type ?? "", ticket.context, ticket.status, ticket.updated].filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
+            if aside {
+                Button("Restore") { store.setIgnored(ticket, false) }
+                    .buttonStyle(.borderless).tint(nil)
+                    .help("Put it back in the list of new tickets")
+            } else if !exists {
+                Button("Ignore") {
+                    selected.remove(ticket.id)
+                    store.setIgnored(ticket, true)
+                }
+                .buttonStyle(.borderless).tint(nil)
+                .help("Hide this ticket here and send no notification about it. It can be restored from “Ignored”.")
+            }
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        .id(ticket.id)
+        .listRowBackground(cursor == ticket.id ? Theme.accent.opacity(0.12) : nil)
         .onTapGesture {
-            guard !exists else { return }
+            cursor = ticket.id
+            guard !exists, !aside else { return }
             if selected.contains(ticket.id) { selected.remove(ticket.id) } else { selected.insert(ticket.id) }
         }
     }
@@ -209,32 +329,9 @@ struct ImportView: View {
             // GitHub's list only says "open"; the refresh below fetches the real state (draft, merged…).
             let known = store.project(t.projectId)?.kind == .github ? nil : t.status
             store.upsert(TaskItem(projectId: t.projectId, ref: t.ref, title: t.title, url: t.url,
-                                  status: store.defaultColumnId, remoteStatus: known))
+                                  status: store.defaultColumnId, remoteStatus: known, remoteType: t.type))
         }
         selected.removeAll()
         Task { await store.refreshRemoteStatuses() }
-    }
-
-    private func load() async {
-        loadedOnce = true
-        loading = true
-        defer { loading = false }
-        let projects = store.projects.filter { $0.kind != .other }
-        tickets = [:]
-        errors = [:]
-        await withTaskGroup(of: (UUID, Result<[RemoteTicket], Error>).self) { group in
-            for project in projects {
-                group.addTask {
-                    do { return (project.id, .success(try await TicketFetcher.assigned(project: project))) }
-                    catch { return (project.id, .failure(error)) }
-                }
-            }
-            for await (id, result) in group {
-                switch result {
-                case .success(let list): tickets[id] = list
-                case .failure(let error): errors[id] = error.localizedDescription
-                }
-            }
-        }
     }
 }

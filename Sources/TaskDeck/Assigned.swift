@@ -1,7 +1,7 @@
 import Foundation
 
 /// An open ticket assigned to me in some tracker, not necessarily on the board yet.
-struct RemoteTicket: Identifiable, Hashable {
+struct RemoteTicket: Identifiable, Hashable, Codable {
     let projectId: UUID
     let ref: String
     let title: String
@@ -10,6 +10,8 @@ struct RemoteTicket: Identifiable, Hashable {
     /// Project/repository inside the tracker.
     let context: String
     let updated: String
+    /// Bug, Story, Epic… as the tracker names it. Optional so lists saved before it existed load.
+    var type: String? = nil
 
     var id: String { "\(projectId.uuidString)|\(ref.lowercased())" }
     var displayRef: String { ref.allSatisfy(\.isNumber) ? "#\(ref)" : ref }
@@ -49,7 +51,8 @@ extension TicketFetcher {
                     url: "\(client.baseURL)/issues/\(id)",
                     status: ((issue["status"] as? [String: Any])?["name"] as? String) ?? "",
                     context: ((issue["project"] as? [String: Any])?["name"] as? String) ?? "",
-                    updated: RedmineDate.pretty(issue["updated_on"] as? String)))
+                    updated: RedmineDate.pretty(issue["updated_on"] as? String),
+                    type: (issue["tracker"] as? [String: Any])?["name"] as? String))
             }
             offset += issues.count
             if issues.isEmpty || offset >= ((json?["total_count"] as? Int) ?? 0) || offset >= 500 { break }
@@ -64,7 +67,7 @@ extension TicketFetcher {
         }
         let headers = jiraHeaders(project: project, token: token)
         let query = "jql=\(q("assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC"))"
-            + "&fields=\(q("summary,status,project,updated"))&maxResults=100"
+            + "&fields=\(q("summary,status,issuetype,project,updated"))&maxResults=100"
         let json: Any
         do {
             // Jira Cloud (current endpoint).
@@ -84,7 +87,8 @@ extension TicketFetcher {
                 url: "\(base)/browse/\(key)",
                 status: ((f["status"] as? [String: Any])?["name"] as? String) ?? "",
                 context: ((f["project"] as? [String: Any])?["name"] as? String) ?? "",
-                updated: RedmineDate.pretty(f["updated"] as? String))
+                updated: RedmineDate.pretty(f["updated"] as? String),
+                type: (f["issuetype"] as? [String: Any])?["name"] as? String)
         }
     }
 
@@ -120,7 +124,9 @@ extension TicketFetcher {
                 url: link,
                 status: isPR ? "Open PR" : "Open issue",
                 context: "\(p.owner)/\(p.repo)",
-                updated: RedmineDate.pretty(item["updated_at"] as? String))
+                updated: RedmineDate.pretty(item["updated_at"] as? String),
+                // Only a type someone set (Bug, Epic…): the status already says issue or pull request.
+                type: (item["type"] as? [String: Any])?["name"] as? String)
         }
     }
 }

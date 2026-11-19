@@ -40,7 +40,8 @@ struct LogTimeView: View {
     private var pending: [DayRow] { rows.filter { $0.include && !$0.done } }
     private var canSubmit: Bool {
         !busy && !pending.isEmpty && pending.allSatisfy { (parse($0.hours) ?? 0) > 0 }
-            && Int(task?.ref ?? "") != nil
+            && Int(task?.ref ?? "") != nil && !suggesting
+            && !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -113,7 +114,7 @@ struct LogTimeView: View {
                     }
                     HStack {
                         TextField("Comment", text: $comment,
-                                  prompt: Text(suggesting ? "Claude is writing a proposal…" : "optional"))
+                                  prompt: Text(suggesting ? "Claude is writing a proposal…" : "required"))
                             .disabled(suggesting)
                         Button { Task { await suggest(auto: false) } } label: {
                             HStack(spacing: 4) {
@@ -149,6 +150,9 @@ struct LogTimeView: View {
             HStack {
                 if busy { ProgressView().controlSize(.small) }
                 Spacer()
+                if !pending.isEmpty && !suggesting && comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Add a comment to log").font(.caption).foregroundStyle(.secondary)
+                }
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Log") { Task { await submit() } }
                     .keyboardShortcut(.defaultAction)

@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 
-/// App-wide settings (TaskDeck → Settings…, ⌘,): general options, board columns, projects and AI.
+/// App-wide settings (TaskDeck → Settings…, ⌘,): general options, notifications, board columns, spaces, agents and AI.
 struct SettingsView: View {
     @AppStorage("settingsTab") private var tab = "projects"
 
@@ -10,6 +10,9 @@ struct SettingsView: View {
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag("general")
+            NotificationSettingsTab()
+                .tabItem { Label("Notifications", systemImage: "bell") }
+                .tag("notifications")
             BoardSettings()
                 .tabItem { Label("Board", systemImage: "rectangle.split.3x1") }
                 .tag("board")
@@ -17,6 +20,9 @@ struct SettingsView: View {
                 .frame(width: 560, height: 420)
                 .tabItem { Label("Spaces", systemImage: "folder") }
                 .tag("projects")
+            AgentSettings()
+                .tabItem { Label("Agents", systemImage: "terminal") }
+                .tag("agents")
             AISettings()
                 .tabItem { Label("AI", systemImage: "sparkles") }
                 .tag("ai")
@@ -104,52 +110,34 @@ private struct GeneralSettings: View {
         Form {
             Section("Timers") {
                 Toggle("Only one timer at a time", isOn: $store.singleTimer)
-            }
-            Section("Notifications") {
-                Toggle("Agent sessions", isOn: $store.notify.sessions)
-                Text("When an agent stops and it is your turn, when it opens a pull request, and when the agent queue cannot start a task or needs you to pick a repository.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle("Pull request merged or closed", isOn: $store.notify.pullRequests)
-                Toggle("Ticket assigned to me", isOn: $store.notify.assigned)
-                Text("Checked every 15 minutes while the app is open. Tickets already on the board are not reported.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle("Time not logged yet", isOn: $store.notify.unlogged)
-                if store.notify.unlogged {
-                    Picker("Remind me from", selection: $store.notify.unloggedHour) {
-                        ForEach(12..<24, id: \.self) { Text("\($0):00").tag($0) }
-                    }
-                }
-                Toggle("Timer running for a long time", isOn: $store.notify.longTimer)
-                if store.notify.longTimer {
-                    Picker("Remind me every", selection: $store.notify.longTimerHours) {
-                        ForEach(1...6, id: \.self) { Text($0 == 1 ? "1 hour" : "\($0) hours").tag($0) }
-                    }
-                }
-                Button("Send a test notification") {
-                    Notifier.send(title: "TaskDeck", body: "Notifications are working.")
-                }
-                Text("If nothing appears, allow TaskDeck in System Settings → Notifications.")
+                Toggle("Start the timer when a card moves to In progress", isOn: $store.notify.autoStartInProgress)
+                Text("Not when the card comes from the agents' column: that was the agent's work, not yours starting.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            if Orca.isInstalled {
-                Section("Agent queue") {
-                    if store.queueColumn == nil {
-                        LabeledContent("Queue column") {
-                            Button("Add a “For agents” column") { store.addQueueColumn() }
+            Section("Forgotten timer") {
+                Toggle("Remind me when I work with no timer", isOn: $store.notify.noTimer)
+                if store.notify.noTimer {
+                    Picker("After", selection: $store.notify.noTimerMinutes) {
+                        ForEach([5, 10, 15, 20, 30], id: \.self) { Text("\($0) minutes at the Mac").tag($0) }
+                    }
+                    // One row for the two ends of the day.
+                    LabeledContent("Working hours") {
+                        HStack(spacing: 6) {
+                            Picker("From", selection: $store.notify.workFrom) {
+                                ForEach(5..<13, id: \.self) { Text("\($0):00").tag($0) }
+                            }
+                            Text("to").foregroundStyle(.secondary)
+                            Picker("Until", selection: $store.notify.workTo) {
+                                ForEach(13..<24, id: \.self) { Text("\($0):00").tag($0) }
+                            }
                         }
-                        Text("A task dragged into that column is started as an agent session in Orca, without the Start session sheet, and then moves to In progress. Nothing starts by itself until the column exists.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Stepper("Sessions working at once: \(store.agentQueueLimit)",
-                                value: $store.agentQueueLimit, in: 1...6)
-                        Toggle("Run without asking for permission", isOn: $store.agentQueueSkipPermissions)
-                        Text("On: the agent is started with Claude Code's --dangerously-skip-permissions, so it edits files and runs commands in the checkout without stopping to ask. The first message contains ticket text written by other people. Off: it stops at the first permission prompt and waits for you in Orca.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Toggle("Ask Claude which repository a ticket is about", isOn: $store.agentQueueAskClaude)
-                        Text("The queue first looks for a repository's name in the ticket. On: when that finds none, the ticket's text is sent to the Claude API with the names of the space's repositories. Either way, when it stays unclear the card asks you to pick one. Needs the API key in the AI tab.")
-                            .font(.caption).foregroundStyle(.secondary)
+                        .labelsHidden()
+                        .fixedSize()
                     }
+                    Toggle("Also at weekends", isOn: $store.notify.noTimerWeekends)
                 }
+                Text("A notification, and a marked clock in the menu bar, when you have been using the Mac that long with nothing tracked. Five minutes without touching it, a locked screen or sleep count as being away.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Data") {
                 LabeledContent("Tasks and tracked time") {
@@ -164,6 +152,134 @@ private struct GeneralSettings: View {
         .fixedSize(horizontal: false, vertical: true)
         .onChange(of: store.singleTimer) { store.save() }
         .onChange(of: store.notify) { store.save() }
+    }
+}
+
+private struct NotificationSettingsTab: View {
+    @Environment(AppStore.self) private var store
+    @State private var sent: [Notifier.Sent] = []
+    @State private var blocked: String?
+
+    var body: some View {
+        @Bindable var store = store
+        Form {
+            if let blocked {
+                Section {
+                    Label(blocked, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Button("Open Notification Settings") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+            }
+            Section("Tickets and agents") {
+                Toggle("Ticket assigned to me", isOn: $store.notify.assigned)
+                    .help("Checked every 15 minutes while the app is open. Tickets you ignored are not reported.")
+                Toggle("Pull request merged or closed", isOn: $store.notify.pullRequests)
+                Toggle("Agent sessions", isOn: $store.notify.sessions)
+                    .help("When an agent stops and it is your turn, when it opens a pull request, and when the agent queue cannot start a task or needs you to pick a repository.")
+                Text("Tickets are checked every 15 minutes while the app is open. Agent sessions: when it is your turn, a pull request opens, or the queue needs you.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Time") {
+                Toggle("Time not logged yet", isOn: $store.notify.unlogged)
+                if store.notify.unlogged {
+                    Picker("Remind me from", selection: $store.notify.unloggedHour) {
+                        ForEach(12..<24, id: \.self) { Text("\($0):00").tag($0) }
+                    }
+                }
+                Toggle("Timer running for a long time", isOn: $store.notify.longTimer)
+                if store.notify.longTimer {
+                    Picker("Remind me every", selection: $store.notify.longTimerHours) {
+                        ForEach(1...6, id: \.self) { Text($0 == 1 ? "1 hour" : "\($0) hours").tag($0) }
+                    }
+                }
+                Text("The reminder about working with no timer is in General.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Dock badge") {
+                Picker("Shows", selection: $store.notify.badge) {
+                    Text("Things waiting for me").tag(NotificationSettings.DockBadge.waiting)
+                    Text("Running timer").tag(NotificationSettings.DockBadge.timer)
+                    Text("Nothing").tag(NotificationSettings.DockBadge.none)
+                }
+                if store.notify.badge == .waiting {
+                    Toggle("Count tickets assigned to me that are not on the board", isOn: $store.notify.badgeAssigned)
+                    Toggle("Count open pull requests", isOn: $store.notify.badgePullRequests)
+                    Text("Always counted: sessions where it is your turn, and queued tasks that need a repository or did not start. Pull requests are the board's sessions', without drafts.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Section("Check") {
+                LabeledContent("If nothing appears, look in System Settings → Notifications, and at Focus.") {
+                    Button("Send a test") {
+                        Notifier.send(title: "TaskDeck", body: "Notifications are working.")
+                        sent = Notifier.recent()
+                    }
+                }
+                DisclosureGroup("Recently sent (\(sent.count))") {
+                    if sent.isEmpty {
+                        Text("Nothing sent yet.").foregroundStyle(.secondary)
+                    }
+                    ForEach(sent) { item in
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack {
+                                Text(item.title).fontWeight(.medium)
+                                Spacer()
+                                Text(item.date.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                            }
+                            Text(item.body).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            if let problem = item.problem {
+                                Text("macOS refused it: \(problem)").font(.caption).foregroundStyle(.red)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        // A fixed height: the list of sent notifications scrolls inside it instead of growing the window.
+        .frame(width: 560, height: 560)
+        .task {
+            sent = Notifier.recent()
+            blocked = await Notifier.blocked()
+        }
+        .onChange(of: store.notify) { store.save() }
+    }
+}
+
+private struct AgentSettings: View {
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        @Bindable var store = store
+        Form {
+            Section("Agent queue") {
+                if !Orca.isInstalled {
+                    Text("Agent sessions need Orca, which was not found on this Mac.").foregroundStyle(.secondary)
+                } else if store.queueColumn == nil {
+                    LabeledContent("Queue column") {
+                        Button("Add a “For agents” column") { store.addQueueColumn() }
+                    }
+                    Text("A task dragged into that column is started as an agent session in Orca, without the Start session sheet, and then moves to In progress. Nothing starts by itself until the column exists.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Stepper("Sessions working at once: \(store.agentQueueLimit)",
+                            value: $store.agentQueueLimit, in: 1...6)
+                    Toggle("Run without asking for permission", isOn: $store.agentQueueSkipPermissions)
+                    Text("On: the agent is started with Claude Code's --dangerously-skip-permissions, so it edits files and runs commands in the checkout without stopping to ask. The first message contains ticket text written by other people. Off: it stops at the first permission prompt and waits for you in Orca.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Ask Claude which repository a ticket is about", isOn: $store.agentQueueAskClaude)
+                    Text("The queue first looks for a repository's name in the ticket. On: when that finds none, the ticket's text is sent to the Claude API with the names of the space's repositories. Either way, when it stays unclear the card asks you to pick one. Needs the API key in the AI tab.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 560)
+        .fixedSize(horizontal: false, vertical: true)
         .onChange(of: store.agentQueueLimit) { store.save() }
         .onChange(of: store.agentQueueSkipPermissions) { store.save() }
         .onChange(of: store.agentQueueAskClaude) { store.save() }
@@ -180,7 +296,7 @@ private struct AISettings: View {
         Form {
             Section("Claude") {
                 SecureField("API key", text: $claudeKey, prompt: Text("sk-ant-…"))
-                Text("Used by “Explain” in the ticket details. Stored in the macOS Keychain. The ticket's text is sent to the Claude API only when you click Explain, or by the agent queue if you turned that on in General.")
+                Text("Used by “Explain” in the ticket details. Stored in the macOS Keychain. The ticket's text is sent to the Claude API only when you click Explain, or by the agent queue if you turned that on in Agents.")
                     .font(.caption).foregroundStyle(.secondary)
                 Picker("Model", selection: $store.claudeModel) {
                     ForEach(Claude.models) { Text($0.name).tag($0.id) }

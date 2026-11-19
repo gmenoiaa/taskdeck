@@ -242,14 +242,35 @@ enum Orca {
         return nil
     }
 
+    /// The terminal entries of a `terminal list` answer, wherever the list sits in it.
+    private static func terminals(in value: Any) -> [[String: Any]] {
+        if let object = value as? [String: Any] {
+            if let list = object["terminals"] as? [[String: Any]] { return list }
+            for child in object.values {
+                let found = terminals(in: child)
+                if !found.isEmpty { return found }
+            }
+        }
+        return []
+    }
+
     /// Brings Orca to the front on the session's agent terminal. If the terminal is gone (closed, or
     /// Orca was restarted), Orca still comes forward so the user can find the worktree by name.
     static func reveal(_ session: AgentSession) async {
-        var handle = session.terminalHandle
-        // A worktree created in Orca has no saved terminal; any live one of it will do.
-        if handle == nil, let path = session.path,
-           let list = try? await run(["terminal", "list", "--worktree", "path:\(path)"]) {
-            handle = firstString("handle", in: list)
+        // The handle saved at start is only good until Orca restarts: it then gives every
+        // terminal a new one, and switching to the old one does nothing. So the worktree's live
+        // terminals are asked for each time.
+        var handle: String?
+        if let path = session.path,
+           let answer = try? await run(["terminal", "list", "--worktree", "path:\(path)"]) {
+            let live = terminals(in: answer)
+            handle = live.first { $0["handle"] as? String == session.terminalHandle }?["handle"] as? String
+                // The agent's terminal rather than a plain shell opened beside it.
+                ?? live.filter { $0["agentIdentity"] is String }
+                    .max { ($0["lastOutputAt"] as? Double ?? 0) < ($1["lastOutputAt"] as? Double ?? 0) }?["handle"] as? String
+                ?? live.max { ($0["lastOutputAt"] as? Double ?? 0) < ($1["lastOutputAt"] as? Double ?? 0) }?["handle"] as? String
+        } else {
+            handle = session.terminalHandle
         }
         if let handle {
             _ = try? await run(["terminal", "switch", "--terminal", handle])
@@ -277,6 +298,15 @@ enum Orca {
         var prURL: URL?
 
         static let gone = Status(kind: .gone)
+
+        /// The pull request's page while the badge is about a pull request (open, merged or
+        /// closed). Nil while it shows the agent itself: a click then belongs to the session.
+        var badgeLink: URL? {
+            switch kind {
+            case .prOpen, .prMerged, .prClosed: return prURL
+            default: return nil
+            }
+        }
 
         var label: String {
             switch kind {

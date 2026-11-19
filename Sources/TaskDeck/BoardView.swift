@@ -13,22 +13,141 @@ struct BoardView: View {
     @State private var showArchive = false
     @State private var showToday = false
     @State private var showPending = false
+    @State private var showWaiting = false
     /// The window's tab: "overview" (the first page) or "board". Remembered between launches.
     @AppStorage("mainTab") private var tab = "overview"
     @State private var search = ""
     @FocusState private var searching: Bool
+    /// The card the keyboard acts on. Nil until an arrow key or a click picks one.
+    @State private var selected: UUID?
+    @State private var deleting: TaskItem?
+    @State private var startingSession: TaskItem?
 
     /// Every word typed has to appear somewhere in the task, in any order, ignoring case and accents.
     private func matches(_ task: TaskItem) -> Bool {
         let words = search.split(whereSeparator: \.isWhitespace)
         guard !words.isEmpty else { return true }
-        let text = [task.title, task.displayRef, task.ref, task.notes, task.remoteStatus ?? "",
+        let text = [task.title, task.displayRef, task.ref, task.notes, task.remoteStatus ?? "", task.remoteType ?? "",
+                    task.estimateGap != nil ? "no estimate" : "",
                     task.remoteAssignee ?? "", store.project(task.projectId)?.name ?? ""]
             .joined(separator: "\n")
         return words.allSatisfy { text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 
-private func newTask() {
+/// Goes to where a waiting thing is dealt with: the session in Orca, the list of assigned
+    /// tickets, or the card on the board (found by searching for it).
+    private func open(_ item: AppStore.WaitingItem) {
+        if item.kind == .assigned { showImport = true; return }
+        if let session = item.session, item.kind == .yourTurn {
+            Task { await Orca.reveal(session) }
+            return
+        }
+        guard let task = item.task else { return }
+        tab = "board"
+        if filter != nil, filter != task.projectId { filter = task.projectId }
+        search = task.ref.isEmpty ? task.title : task.ref
+    }
+
+    // MARK: Keyboard
+
+    /// The cards on screen, lane by lane, as filtered by space and search.
+    private var lanes: [(column: BoardColumn, tasks: [TaskItem])] {
+        store.columns.map { ($0, store.tasks(in: $0.id, project: filter).filter(matches)) }
+    }
+
+    private func openCard(_ task: TaskItem) {
+        // Without an integration there are no details to fetch: open the editor.
+        if TicketFetcher.canFetch(project: store.project(task.projectId), task: task) { details = task } else { editing = task }
+    }
+
+    /// Handles a key pressed in the main window while no text is being typed. True when used.
+    private func key(_ event: NSEvent, inSearch: Bool) -> Bool {
+        guard tab == "board" else { return false }
+        let lanes = lanes
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let first = lanes.first { !$0.tasks.isEmpty }?.tasks.first
+        if inSearch {
+            // Down, Return or Tab leaves the field for the first card found.
+            guard flags.isEmpty, [125, 36, 48].contains(event.keyCode), let first else { return false }
+            event.window?.makeFirstResponder(nil)
+            selected = first.id
+            return true
+        }
+        var lane = 0, row = 0, current: TaskItem?
+        for (l, entry) in lanes.enumerated() {
+            if let r = entry.tasks.firstIndex(where: { $0.id == selected }) { lane = l; row = r; current = entry.tasks[r] }
+        }
+        let arrows: Set<UInt16> = [123, 124, 125, 126, 48]
+        guard let task = current else {
+            // Nothing picked yet: any arrow, or Tab, starts at the first card.
+            guard flags.isEmpty || flags == .shift, arrows.contains(event.keyCode), let first else { return false }
+            selected = first.id
+            return true
+        }
+        let cards = lanes[lane].tasks
+        // Tab goes lane by lane, to the top card, and round again at the end. macOS itself only
+        // moves Tab between text fields, and the board has none.
+        if event.keyCode == 48, flags.isEmpty || flags == .shift {
+            let step = flags == .shift ? -1 : 1
+            var l = lane
+            repeat { l = (l + step + lanes.count) % lanes.count } while lanes[l].tasks.isEmpty && l != lane
+            if let top = lanes[l].tasks.first { selected = top.id }
+            return true
+        }
+        if flags == .command {
+            switch event.keyCode {
+            case 126: if row > 0 { store.place(task.id, before: cards[row - 1].id, in: task.status) }
+            case 125: if row < cards.count - 1 {
+                store.place(task.id, before: row + 2 < cards.count ? cards[row + 2].id : nil, in: task.status)
+            }
+            case 123: if lane > 0 { store.move(task.id, to: lanes[lane - 1].column.id) }
+            case 124: if lane < lanes.count - 1 { store.move(task.id, to: lanes[lane + 1].column.id) }
+            default: return false
+            }
+            return true
+        }
+        guard flags.isEmpty else { return false }
+        switch event.keyCode {
+        case 126: if row > 0 { selected = cards[row - 1].id }
+        case 125: if row < cards.count - 1 { selected = cards[row + 1].id }
+        case 123, 124:
+            // The nearest lane that way with a card in it, at the same height when it has one.
+            let step = event.keyCode == 123 ? -1 : 1
+            var l = lane + step
+            while l >= 0, l < lanes.count, lanes[l].tasks.isEmpty { l += step }
+            if l >= 0, l < lanes.count { selected = lanes[l].tasks[min(row, lanes[l].tasks.count - 1)].id }
+        case 36, 76: openCard(task)
+        case 49: store.toggleTimer(task.id)
+        case 53: selected = nil
+        case 51, 117: deleting = task
+        default:
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "e": editing = task
+            case "o":
+                guard let url = URL(string: task.url), !task.url.isEmpty else { return false }
+                Browser.open(url, space: store.project(task.projectId))
+            case "l":
+                guard store.project(task.projectId)?.kind == .redmine else { return false }
+                logging = task
+            case "s":
+                guard Orca.isInstalled else { return false }
+                startingSession = task
+            case "c":
+                guard !task.url.isEmpty else { return false }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(task.url, forType: .string)
+            default: return false
+            }
+        }
+        return true
+    }
+
+    private func focusSearch() {
+        searching = true
+        focusToolbarSearch(placeholder: "Search tasks")
+    }
+
+    private func newTask() {
         editing = TaskItem(projectId: filter ?? store.projects.first?.id, status: store.defaultColumnId)
     }
 
@@ -66,6 +185,13 @@ private func newTask() {
                         .buttonStyle(.borderedProminent).tint(Theme.pending)
                 }
             }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var searchGap: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
         }
     }
 
@@ -119,25 +245,54 @@ private func newTask() {
                     // Columns share the window width; with many columns they keep a readable width and scroll sideways.
                     let count = CGFloat(max(store.columns.count, 1))
                     let width = max(250, (geo.size.width - 24 - 12 * (count - 1)) / count)
+                    ScrollViewReader { sideways in
                     ScrollView(.horizontal) {
                         HStack(alignment: .top, spacing: 12) {
                             ForEach(store.columns) { column in
                                 ColumnView(
                                     column: column,
                                     tasks: store.tasks(in: column.id, project: filter).filter(matches),
+                                    selected: selected,
+                                    onSelect: { selected = $0.id },
                                     onEdit: { editing = $0 },
                                     onLog: { logging = $0 },
                                     onDetails: { details = $0 },
                                     onShowArchive: { showArchive = true }
                                 )
                                 .frame(width: width)
+                                .id(column.id)
                             }
                         }
                         .padding(12)
                         .frame(height: geo.size.height)
                     }
+                    // With many lanes the picked card's lane may be off to the side.
+                    .onChange(of: selected) { _, new in
+                        if let column = store.tasks.first(where: { $0.id == new })?.status {
+                            withAnimation(.easeOut(duration: 0.15)) { sideways.scrollTo(column) }
+                        }
+                    }
+                    }
+                }
+                .background(KeyCatcher(handler: key))
+                .sheet(item: $startingSession) { task in
+                    StartSessionView(taskId: task.id, detail: TicketCache.load(task.id)?.detail).environment(store)
+                }
+                .confirmationDialog("Delete “\(deleting.map { $0.title.isEmpty ? $0.displayRef : $0.title } ?? "")”?",
+                                    isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+                    Button("Delete task", role: .destructive) {
+                        if let id = deleting?.id { store.delete(task: id) }
+                        deleting = nil
+                    }
+                    Button("Cancel", role: .cancel) { deleting = nil }
+                } message: {
+                    Text("Its tracked time is deleted too. This cannot be undone.")
                 }
             }
+        }
+        .overlay(alignment: .bottom) {
+            BackdateBanner().frame(maxWidth: 520).padding(.bottom, 16)
+                .animation(.easeOut(duration: 0.2), value: store.backdateOffer)
         }
         // The menu bar carries the shortcuts, so each shows next to its command there.
         .focusedSceneValue(\.board, BoardActions(
@@ -145,7 +300,7 @@ private func newTask() {
             fetchAssigned: { showImport = true },
             logPending: pendingSeconds > 0 ? { showPending = true } : nil,
             showArchive: { showArchive = true },
-            search: { searching = true },
+            search: focusSearch,
             show: { tab = $0 },
             space: filter,
             showSpace: { filter = $0 }))
@@ -216,18 +371,27 @@ private func newTask() {
                 .padding(.horizontal, 10)
                 .frame(width: 190)
             }
+            // Keeps the search field a pill of its own. Without it the buttons that follow share
+            // its glass whenever there is no time-to-push button in between.
+            searchGap
             pendingItem
             ToolbarItemGroup(placement: .primaryAction) {
-                Button { Task { await store.refreshEverything() } } label: {
-                    // The spinner takes the icon's place while refreshing, so the button keeps its size.
-                    ZStack {
-                        Image(systemName: "arrow.clockwise").opacity(store.refreshingStatuses ? 0 : 1)
-                        if store.refreshingStatuses { ProgressView().controlSize(.small) }
+                let waiting = store.waitingItems.count
+                Button { showWaiting.toggle() } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: waiting == 0 ? "bell" : "bell.badge")
+                        if waiting > 0 { Text("\(waiting)").monospacedDigit() }
                     }
-                    .accessibilityLabel(store.refreshingStatuses ? "Refreshing statuses" : "Refresh statuses")
                 }
-                .disabled(store.refreshingStatuses)
-                .help("Refresh ticket statuses and assignees from the trackers, and agent sessions and pull requests (⌘R)")
+                .help(waiting == 0 ? "Nothing is waiting for you" : "Waiting for you: \(waiting)")
+                .popover(isPresented: $showWaiting, arrowEdge: .bottom) {
+                    WaitingList { item in
+                        showWaiting = false
+                        open(item)
+                    }
+                    .environment(store)
+                }
+                // Refresh has no button: it is Tasks → Refresh (⌘R), and runs by itself every 15 minutes.
                 Button { showImport = true } label: {
                     Label("Assigned to me", systemImage: "tray.and.arrow.down")
                 }
@@ -269,6 +433,159 @@ private struct NoToolbarTitle: ViewModifier {
 }
 
 /// What the main window offers to the menu bar. Nil while another window is in front.
+/// What the Dock badge counts, one line each. A click goes to where the thing is dealt with.
+private struct WaitingList: View {
+    @Environment(AppStore.self) private var store
+    let open: (AppStore.WaitingItem) -> Void
+
+    var body: some View {
+        let items = store.waitingItems
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Waiting for you").font(.headline)
+                Spacer()
+                if !items.isEmpty {
+                    Button("Clear all") { store.clearWaiting(items.map(\.id)) }
+                        .buttonStyle(.borderless).font(.callout)
+                        .help("Take everything off this list. Each item comes back if it happens again.")
+                }
+            }
+            if items.isEmpty {
+                Text("Nothing is waiting for you.").font(.callout).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(items) { item in
+                            HStack(spacing: 4) {
+                                Button { open(item) } label: { row(item) }.buttonStyle(.plain)
+                                Button { store.clearWaiting([item.id]) } label: {
+                                    Image(systemName: "xmark").font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20, height: 20).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .help("Clear this one. It comes back if it happens again.")
+                            }
+                        }
+                    }
+                }
+                // A scroll view has no height of its own in a popover.
+                .frame(height: min(360, CGFloat(items.count) * 44))
+            }
+        }
+        .padding(14)
+        .frame(width: 340)
+    }
+
+    private func row(_ item: AppStore.WaitingItem) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon(item.kind)).foregroundStyle(color(item.kind)).frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                if let task = item.task {
+                    Text("\(task.displayRef) \(task.title)".trimmingCharacters(in: .whitespaces)).lineLimit(1)
+                } else if let title = item.title {
+                    Text(title).lineLimit(1)
+                }
+                let alone = item.task == nil && item.title == nil
+                Text(item.detail).font(alone ? .body : .caption)
+                    .foregroundStyle(alone ? .primary : .secondary).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(height: 40)
+        .contentShape(Rectangle())
+        .help(item.detail)
+    }
+
+    private func icon(_ kind: AppStore.WaitingItem.Kind) -> String {
+        switch kind {
+        case .yourTurn: return "bubble.left.fill"
+        case .pullRequest: return "arrow.triangle.pull"
+        case .repository: return "questionmark.folder"
+        case .notStarted: return "exclamationmark.triangle.fill"
+        case .assigned: return "tray.and.arrow.down"
+        }
+    }
+
+    private func color(_ kind: AppStore.WaitingItem.Kind) -> Color {
+        switch kind {
+        case .yourTurn, .repository: return .orange
+        case .notStarted: return .red
+        case .pullRequest, .assigned: return .secondary
+        }
+    }
+}
+
+/// Finds the toolbar's search field in the window and gives it the keyboard. Focus state alone
+/// does not do it: a toolbar item is hosted outside the view that owns the state, so setting
+/// it from a menu command is not reliably carried over.
+@MainActor
+func focusToolbarSearch(placeholder: String) {
+    guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+    func find(_ view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.isEditable, field.placeholderString == placeholder { return field }
+        for child in view.subviews {
+            if let found = find(child) { return found }
+        }
+        return nil
+    }
+    // The toolbar lives in the window's frame view, beside the content view rather than in it.
+    let roots = [window.contentView?.superview].compactMap { $0 } + (window.toolbar?.items.compactMap(\.view) ?? [])
+    for root in roots {
+        if let field = find(root) {
+            window.makeFirstResponder(field)
+            // Like Find elsewhere: what is already typed is selected, ready to be replaced.
+            field.currentEditor()?.selectAll(nil)
+            return
+        }
+    }
+}
+
+/// Passes key presses in its window to a view. A window-level watch rather than SwiftUI focus:
+/// a board or a list of rows is not a control, and focus does not settle on it reliably. Keys
+/// typed into a text field are left alone, except in the one field named, which may hand over.
+struct KeyCatcher: NSViewRepresentable {
+    /// Placeholder of the text field whose keys are passed on too (with `inField` true).
+    var field: String? = "Search tasks"
+    /// True when the key was used and should go no further.
+    let handler: (NSEvent, _ inField: Bool) -> Bool
+
+    final class Coordinator {
+        var handler: (NSEvent, Bool) -> Bool = { _, _ in false }
+        weak var view: NSView?
+        var monitor: Any?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        let coordinator = context.coordinator
+        let fieldName = field
+        coordinator.view = view
+        coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Only the board's own window, and not while a sheet covers it.
+            guard let window = coordinator.view?.window, event.window === window, window.attachedSheet == nil else { return event }
+            var inSearch = false
+            if let editor = window.firstResponder as? NSText {
+                guard let field = editor.delegate as? NSTextField, fieldName != nil, field.placeholderString == fieldName else { return event }
+                inSearch = true
+            }
+            return coordinator.handler(event, inSearch) ? nil : event
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // Refreshed on every pass, so the handler always sees the board as it is now.
+        context.coordinator.handler = handler
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        if let monitor = coordinator.monitor { NSEvent.removeMonitor(monitor) }
+    }
+}
+
 struct BoardActions {
     var newTask: () -> Void
     var fetchAssigned: () -> Void
@@ -463,11 +780,16 @@ struct ColumnView: View {
     @Environment(AppStore.self) private var store
     let column: BoardColumn
     let tasks: [TaskItem]
+    var selected: UUID? = nil
+    var onSelect: (TaskItem) -> Void = { _ in }
     let onEdit: (TaskItem) -> Void
     let onLog: (TaskItem) -> Void
     let onDetails: (TaskItem) -> Void
     let onShowArchive: () -> Void
     @State private var targeted = false
+    /// The card a dragged task would be placed above, while one is held over it.
+    @State private var dropAbove: UUID?
+    @State private var dropAtEnd = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -495,13 +817,48 @@ struct ColumnView: View {
             }
             .padding(.horizontal, 4)
 
+            ScrollViewReader { lane in
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(tasks) { task in
-                        TaskCard(task: task, onEdit: { onEdit(task) }, onLog: { onLog(task) }, onDetails: { onDetails(task) })
+                        TaskCard(task: task, selected: selected == task.id, onSelect: { onSelect(task) },
+                                 onEdit: { onEdit(task) }, onLog: { onLog(task) }, onDetails: { onDetails(task) })
+                            // A line in the gap above the card shows where the dragged one lands.
+                            .overlay(alignment: .top) {
+                                if dropAbove == task.id {
+                                    Capsule().fill(Theme.accent).frame(height: 3).offset(y: -5.5)
+                                }
+                            }
+                            .dropDestination(for: String.self) { items, _ in
+                                guard let raw = items.first, let id = UUID(uuidString: raw) else { return false }
+                                store.place(id, before: task.id, in: column.id)
+                                return true
+                            } isTargeted: { over in
+                                if over { dropAbove = task.id } else if dropAbove == task.id { dropAbove = nil }
+                            }
                     }
+                    // Room under the last card to drop a task at the end of the lane.
+                    Color.clear
+                        .frame(height: 44)
+                        .contentShape(Rectangle())
+                        .overlay(alignment: .top) {
+                            if dropAtEnd { Capsule().fill(Theme.accent).frame(height: 3).offset(y: -5.5) }
+                        }
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let raw = items.first, let id = UUID(uuidString: raw) else { return false }
+                            store.place(id, before: nil, in: column.id)
+                            return true
+                        } isTargeted: { dropAtEnd = $0 }
                 }
                 .padding(.bottom, 8)
+                .animation(.easeOut(duration: 0.15), value: tasks.map(\.id))
+            }
+            // Keeps the card picked with the keyboard in view in a long lane.
+            .onChange(of: selected) { _, new in
+                if let new, tasks.contains(where: { $0.id == new }) {
+                    withAnimation(.easeOut(duration: 0.15)) { lane.scrollTo(new) }
+                }
+            }
             }
         }
         .padding(10)
@@ -525,11 +882,14 @@ struct ColumnView: View {
 struct TaskCard: View {
     @Environment(AppStore.self) private var store
     let task: TaskItem
+    var selected = false
+    var onSelect: () -> Void = {}
     let onEdit: () -> Void
     let onLog: () -> Void
     let onDetails: () -> Void
     @State private var hovering = false
     @State private var confirmDelete = false
+    @State private var startingSession = false
 
     private func footer(project: Project?, running: Bool, compact: Bool) -> some View {
         HStack(spacing: 8) {
@@ -570,18 +930,34 @@ struct TaskCard: View {
                 .buttonStyle(.plain)
                 .help("\(Fmt.short(task.unloggedSeconds)) not logged yet — click to log it to Redmine")
             }
+            // Not on finished work: an estimate nobody set no longer needs setting.
+            if let gap = task.estimateGap, store.role(of: task.status) != .done {
+                Image(systemName: "hourglass")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.orange)
+                    .frame(width: 20, height: 20)
+                    .background(Color.orange.opacity(0.15), in: Circle())
+                    .help("\(gap) not set in Redmine. Set it in the ticket details.")
+            }
             if store.role(of: task.status) == .agents {
                 QueueBadge(task: task)
             }
             if let session = store.headlineSession(of: task) {
                 let status = store.status(of: session)
-                Button { Task { await Orca.reveal(session) } } label: {
+                Button {
+                    // A badge that names a pull request opens it; the session is in the card's menu.
+                    if let pr = status?.badgeLink {
+                        Browser.open(pr, space: project)
+                    } else {
+                        Task { await Orca.reveal(session) }
+                    }
+                } label: {
                     SessionBadge(status: status, count: store.sessions(of: task).count, compact: compact)
                         .fixedSize()
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
-                .help("Agent session “\(session.name)” in \(session.repoName). \(status?.detail ?? "") Click to open it in Orca.")
+                .help("Agent session “\(session.name)” in \(session.repoName). \(status?.detail ?? "") \(status?.badgeLink != nil ? "Click to open the pull request; right-click the card for the session." : "Click to open it in Orca.")")
             }
             Spacer(minLength: 0)
             Button {
@@ -598,72 +974,91 @@ struct TaskCard: View {
         }
     }
 
+    /// Up to two letters for a person: "luiz.v" is LV, "Geiser Menoia" is GM.
+    private func initials(_ name: String) -> String {
+        let words = name.split { " ._-@".contains($0) }.prefix(2)
+        return words.compactMap(\.first).map { String($0).uppercased() }.joined()
+    }
+
+    private func header(project: Project?, running: Bool, type showType: Bool, total showTotal: Bool) -> some View {
+        HStack(spacing: 6) {
+            // The project is shown by the colour strip on the card's left edge.
+            if !task.displayRef.isEmpty {
+                if let url = URL(string: task.url), !task.url.isEmpty {
+                    TicketLink(text: task.displayRef, url: url, space: project)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .help(task.url)
+                } else {
+                    Text(task.displayRef).font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            } else {
+                // A task without a ticket has nothing to put here, which left the row looking
+                // broken. Saying so fills the place the reference would, in the same colour.
+                Text("No ticket")
+                    .font(.caption.weight(.medium)).foregroundStyle(Theme.accent)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            if showType, let type = task.remoteType, !type.isEmpty {
+                // Plain text, not a second pill: two pills side by side read as two statuses.
+                Text(type)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help("Type in \(project?.kind.label ?? "the tracker")")
+            }
+            Spacer(minLength: 0)
+            // Only while a timer runs and there is earlier time: otherwise the bottom row's
+            // figure already is the total.
+            if showTotal, running, task.total(now: store.now) - task.currentStretch(now: store.now) >= 60 {
+                Label(Fmt.short(task.total(now: store.now)), systemImage: "sum")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help("All time tracked on this task, this sitting included")
+            }
+            if let status = task.remoteStatus, !status.isEmpty {
+                // The one thing in this row that may be cut short; the rest keeps its width.
+                Text(status.prefix(1).uppercased() + status.dropFirst())
+                    .font(.caption2.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+                    .foregroundStyle(.secondary)
+                    .layoutPriority(-1)
+                    .help("\(status) in \(project?.kind.label ?? "the tracker")")
+            }
+            // Initials, not the name: a name never fitted beside the rest and was cut to a letter
+            // or two anyway. The full name is in the tooltip and in the ticket details.
+            if let assignee = task.remoteAssignee, !assignee.isEmpty {
+                Text(initials(assignee))
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 18, height: 18)
+                    .background(.quaternary, in: Circle())
+                    .help("Assigned to \(assignee) in \(project?.kind.label ?? "the tracker")")
+            }
+        }
+    }
+
     var body: some View {
         let project = store.project(task.projectId)
         let running = task.isRunning
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                // The project is shown by the colour strip on the card's left edge.
-                if !task.displayRef.isEmpty {
-                    if let url = URL(string: task.url), !task.url.isEmpty {
-                        TicketLink(text: task.displayRef, url: url, space: project)
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                            .fixedSize()
-                            .help(task.url)
-                    } else {
-                        Text(task.displayRef).font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
-                } else {
-                    // A task without a ticket has nothing to put here, which left the row looking
-                    // broken. Saying so fills the place the reference would, in the same colour.
-                    Text("No ticket")
-                        .font(.caption.weight(.medium)).foregroundStyle(Theme.accent)
-                        .lineLimit(1)
-                        .fixedSize()
-                }
-                if let status = task.remoteStatus, !status.isEmpty {
-                    Text(status.prefix(1).uppercased() + status.dropFirst())
-                        .font(.caption2.weight(.medium))
-                        .lineLimit(1)
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(.quaternary, in: Capsule())
-                        .foregroundStyle(.secondary)
-                        .help("Status in \(project?.kind.label ?? "the tracker")")
-                }
-                if let note = task.statusNote {
-                    Button { store.pushStatus(of: task.id) } label: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.caption).foregroundStyle(.red)
-                    }
-                    .buttonStyle(.plain)
-                    .help("The status was not changed in \(project?.kind.label ?? "the tracker"). \(note) Click to try again.")
-                }
-                // Next to the status: both say where the ticket stands in the tracker.
-                if let assignee = task.remoteAssignee, !assignee.isEmpty {
-                    Label(assignee, systemImage: "person")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        // The name is the one thing in this row that may shrink.
-                        .layoutPriority(-1)
-                        .help("Assigned to \(assignee) in \(project?.kind.label ?? "the tracker")")
-                }
-                Spacer(minLength: 0)
-                // Only while a timer runs and there is earlier time: otherwise the bottom row's
-                // figure already is the total.
-                if running, task.total(now: store.now) - task.currentStretch(now: store.now) >= 60 {
-                    Label(Fmt.short(task.total(now: store.now)), systemImage: "sum")
-                        .labelStyle(.titleAndIcon)
-                        .font(.caption).monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .fixedSize()
-                        .help("All time tracked on this task, this sitting included")
-                }
+            // The whole row when it fits; in a narrow column the type goes first, then the total.
+            // A row wider than the card is not cut off but pushes the card out of its column.
+            ViewThatFits(in: .horizontal) {
+                header(project: project, running: running, type: true, total: true)
+                header(project: project, running: running, type: false, total: true)
+                header(project: project, running: running, type: false, total: false)
             }
 
             Text(task.title.isEmpty ? "(untitled)" : task.title)
@@ -713,7 +1108,7 @@ struct TaskCard: View {
         .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(
             RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                .strokeBorder(selected ? Theme.accent : Color.primary.opacity(0.08), lineWidth: selected ? 2 : 1)
         )
         // A strip in the project's colour down the left edge, cut to the card's rounded corners.
         .overlay(alignment: .leading) {
@@ -732,20 +1127,30 @@ struct TaskCard: View {
             // Without an integration there are no details to fetch: open the editor.
             if TicketFetcher.canFetch(project: project, task: task) { onDetails() } else { onEdit() }
         }
+        // After the double-click, so that one is recognised first. A click picks the card for the keyboard.
+        .onTapGesture { onSelect() }
         .help(TicketFetcher.canFetch(project: project, task: task) ? "Double-click to see ticket details" : "Double-click to edit")
         .draggable(task.id.uuidString)
         .contextMenu {
+            let link = task.url.isEmpty ? nil : URL(string: task.url)
             Button(running ? "Pause timer" : "Start timer") { store.toggleTimer(task.id) }
-            Button("Edit…", action: onEdit)
-            if let url = URL(string: task.url), !task.url.isEmpty {
-                Button("Open ticket in browser") { Browser.open(url, space: project) }
+            // Only with something to log: otherwise the sheet opens empty.
+            if project?.kind == .redmine, task.unloggedSeconds >= 60 {
+                Button("Log time to Redmine…", action: onLog)
             }
+            Divider()
             if TicketFetcher.canFetch(project: project, task: task) {
                 Button("View ticket details…", action: onDetails)
             }
-            if project?.kind == .redmine {
-                Button("Log time to Redmine…", action: onLog)
+            if let link {
+                Button("Open ticket in browser") { Browser.open(link, space: project) }
+                Button("Copy link") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(link.absoluteString, forType: .string)
+                }
             }
+            Divider()
+            Button("Start agent session…") { startingSession = true }
             if let session = store.headlineSession(of: task) {
                 Button("Open session in Orca") { Task { await Orca.reveal(session) } }
             }
@@ -754,12 +1159,22 @@ struct TaskCard: View {
             }
             Divider()
             Menu("Move to") {
+                Button("Top of this lane") { store.moveToTop(task.id) }
+                Button("Bottom of this lane") { store.place(task.id, before: nil, in: task.status) }
+                Divider()
                 ForEach(store.columns.filter { $0.id != task.status }) { c in
                     Button(c.displayName) { store.move(task.id, to: c.id) }
                 }
             }
             Divider()
+            Button("Edit…", action: onEdit)
+            Button("Archive") { store.archive(task: task.id) }
             Button("Delete…", role: .destructive) { confirmDelete = true }
+        }
+        .sheet(isPresented: $startingSession) {
+            // The ticket as last loaded in the details, when there is a copy: the prompt is
+            // better with the description than with the title alone.
+            StartSessionView(taskId: task.id, detail: TicketCache.load(task.id)?.detail).environment(store)
         }
         .confirmationDialog("Delete “\(task.title.isEmpty ? task.displayRef : task.title)”?", isPresented: $confirmDelete) {
             Button("Delete task", role: .destructive) {

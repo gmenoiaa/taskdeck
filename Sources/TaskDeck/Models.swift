@@ -105,9 +105,6 @@ struct Project: Identifiable, Codable, Hashable {
     /// The first message for this space's agent sessions, with placeholders such as "{ref}" (see
     /// `Orca.placeholders`). Empty or nil means the app's standard message.
     var sessionPrompt: String?
-    /// The tracker status a ticket gets when its task enters a column, by column id. A column that
-    /// is not here changes nothing. The value is a `TrackerStatus.id`.
-    var statusByColumn: [String: String]?
     /// The browser this space's links open in ("chrome", "edge"); nil for the system default.
     var browser: String?
     /// The browser profile's folder ("Default", "Profile 1"); nil for the browser's last used profile.
@@ -156,6 +153,11 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var archived = false
     /// The ticket's own status in its tracker (e.g. "Assigned", "In Review", "merged"), when known.
     var remoteStatus: String?
+    /// The kind of ticket in its tracker (Bug, Story, Pull request…), when known.
+    var remoteType: String?
+    /// Which estimate the ticket lacks in its tracker ("Estimate", "Dev estimate" or both), as
+    /// last seen. Nil when none is missing, or for a tracker without estimates.
+    var estimateGap: String?
     /// Who the ticket is assigned to in its tracker, when known.
     var remoteAssignee: String?
     /// Last plain-language explanation of the ticket written by Claude (Markdown).
@@ -168,9 +170,6 @@ struct TaskItem: Identifiable, Codable, Hashable {
     /// Nil while the task simply waits its turn.
     var queueNote: String?
     static let needsRepository = "repository"
-    /// Why the tracker refused the status of the column the task was last moved to; nil when it
-    /// took it, or when the column changes nothing.
-    var statusNote: String?
     var order: Double = 0
 
     var isRunning: Bool { entries.contains { $0.end == nil } }

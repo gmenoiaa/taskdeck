@@ -26,8 +26,26 @@ final class AppStore {
     @ObservationIgnored var sessionKinds: [String: Orca.Status.Kind] = [:]
     /// Tickets already seen as assigned to me; nil until the first look, which only takes note.
     @ObservationIgnored var knownAssigned: Set<String>?
+    /// Waiting items the user cleared from the bell's list, by `WaitingItem.id`.
+    var clearedWaiting: Set<String> = []
+    /// Pull requests whose end (merged or closed) was already reported, as "worktree|kind". Saved:
+    /// after a launch the app learns again that an old one is merged, and that is not news.
+    var announcedPullRequests: Set<String> = []
+    /// What each space's tracker lists as assigned to me, as of the last look (kept in `assigned.json`).
+    var assignedTickets: [UUID: [RemoteTicket]] = [:]
+    /// Why a space's tracker could not be read at the last look.
+    var assignedErrors: [UUID: String] = [:]
+    var refreshingAssigned = false
+    /// Assigned tickets the user does not want on the board, by `RemoteTicket.id`.
+    var ignoredAssigned: Set<String> = []
     /// When the end-of-day reminder about unlogged time was last sent.
     @ObservationIgnored var unloggedRemindedAt: Date?
+    /// Since when the user has been at the Mac in one go; nil while away or idle. Not saved.
+    var activeSince: Date? = Date()
+    @ObservationIgnored var noTimerRemindedAt: Date?
+    /// Set for a short while after a timer starts late: the choice to count from earlier.
+    var backdateOffer: BackdateOffer?
+    var isAway: Bool { !awayReasons.isEmpty }
     /// How many times a running entry has been reported as running long.
     @ObservationIgnored var longTimerReminders: [UUID: Int] = [:]
     /// Updated every second; views showing running timers read from here.
@@ -71,6 +89,9 @@ final class AppStore {
         var agentQueueAskClaude: Bool?
         var notify: NotificationSettings?
         var knownAssigned: [String]?
+        var clearedWaiting: [String]?
+        var announcedPullRequests: [String]?
+        var ignoredAssigned: [String]?
         var unloggedRemindedAt: Date?
     }
 
@@ -83,7 +104,9 @@ final class AppStore {
 
     init() {
         load()
+        loadAssigned()
         Notifier.setUp()
+        Notifier.onStart = { [weak self] id, since in self?.startTimer(id, from: since) }
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.now = Date()
@@ -97,7 +120,7 @@ final class AppStore {
         statusLoop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshRemoteStatuses()
-                await self?.noticeNewAssignments()
+                await self?.refreshAssigned()
                 try? await Task.sleep(for: .seconds(15 * 60))
             }
         }
@@ -115,6 +138,8 @@ final class AppStore {
                     await self?.runAgentQueue()
                 }
                 self?.noticeTimers()
+                self?.trackPresence()
+                self?.noticeNoTimer()
                 try? await Task.sleep(for: .seconds(10))
             }
         }
@@ -179,6 +204,7 @@ final class AppStore {
 
     private func left(_ reason: String) {
         awayReasons.insert(reason)
+        activeSince = nil
         // The first sign counts: the display goes dark some time before the Mac sleeps.
         guard awaySince == nil, tasks.contains(where: \.isRunning) else { return }
         awaySince = Date()
@@ -187,6 +213,7 @@ final class AppStore {
 
     private func returned(_ reason: String) {
         awayReasons.remove(reason)
+        if awayReasons.isEmpty, activeSince == nil { activeSince = Date() }
         // A display that wakes behind a locked screen is not the user being back.
         guard awayReasons.isEmpty, awaySince != nil else { return }
         let back = Date()
@@ -273,6 +300,9 @@ final class AppStore {
             agentQueueAskClaude = snap.agentQueueAskClaude ?? false
             notify = snap.notify ?? NotificationSettings()
             knownAssigned = snap.knownAssigned.map(Set.init)
+            clearedWaiting = Set(snap.clearedWaiting ?? [])
+            announcedPullRequests = Set(snap.announcedPullRequests ?? [])
+            ignoredAssigned = Set(snap.ignoredAssigned ?? [])
             unloggedRemindedAt = snap.unloggedRemindedAt
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
@@ -293,7 +323,10 @@ final class AppStore {
                             awaySince: awaySince, agentQueueLimit: agentQueueLimit,
                             agentQueueSkipPermissions: agentQueueSkipPermissions,
                             agentQueueAskClaude: agentQueueAskClaude, notify: notify,
-                            knownAssigned: knownAssigned.map { $0.sorted() }, unloggedRemindedAt: unloggedRemindedAt)
+                            knownAssigned: knownAssigned.map { $0.sorted() },
+                            clearedWaiting: clearedWaiting.isEmpty ? nil : clearedWaiting.sorted(),
+                            announcedPullRequests: announcedPullRequests.isEmpty ? nil : announcedPullRequests.sorted(),
+                            ignoredAssigned: ignoredAssigned.isEmpty ? nil : ignoredAssigned.sorted(), unloggedRemindedAt: unloggedRemindedAt)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
@@ -346,7 +379,6 @@ final class AppStore {
             }
             tasks[i] = task
             if role(of: task.status) == .done { closeEntries(at: i) }
-            if moved { pushStatus(of: task.id) }
         } else {
             task.order = nextOrder
             tasks.append(task)
@@ -356,19 +388,63 @@ final class AppStore {
 
     func delete(task id: UUID) {
         tasks.removeAll { $0.id == id }
+        TicketCache.remove(id)
         save()
     }
 
     func move(_ id: UUID, to columnId: String) {
         guard let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].status != columnId,
               column(columnId) != nil else { return }
+        let from = role(of: tasks[i].status)
         tasks[i].status = columnId
         tasks[i].order = nextOrder
+        // Moving a card to In progress is saying "I am on this now". Not from the agents' lane:
+        // that card was the agent's work, and picking it up is not the user starting on it.
+        if notify.autoStartInProgress, role(of: columnId) == .inProgress, from != .agents, !tasks[i].isRunning {
+            begin(i)
+            now = Date()
+            updateDockBadge()
+        }
         // Dragging a task back into the queue is how a failed start is tried again.
         tasks[i].queueNote = nil
         if role(of: columnId) == .done { closeEntries(at: i) }
         save()
-        pushStatus(of: id)
+    }
+
+    /// Puts a task just above another one in a column, or last when `target` is nil, changing
+    /// its column if needed.
+    func place(_ id: UUID, before target: UUID?, in columnId: String) {
+        guard id != target, column(columnId) != nil, tasks.contains(where: { $0.id == id }) else { return }
+        move(id, to: columnId)
+        // The whole column, not only the space being shown: `order` is shared by every space.
+        var ids = tasks.filter { $0.status == columnId && !$0.archived && $0.id != id }
+            .sorted { $0.order < $1.order }
+            .map(\.id)
+        ids.insert(id, at: target.flatMap { ids.firstIndex(of: $0) } ?? ids.count)
+        // Renumbered rather than squeezed between two neighbours: tasks can share an `order`,
+        // and then there is no value in between. Order is only ever compared inside a column.
+        for (position, taskId) in ids.enumerated() {
+            if let i = tasks.firstIndex(where: { $0.id == taskId }) { tasks[i].order = Double(position + 1) }
+        }
+        save()
+    }
+
+    /// Puts a task first in its own column.
+    func moveToTop(_ id: UUID) {
+        guard let task = task(id) else { return }
+        let first = tasks.filter { $0.status == task.status && !$0.archived && $0.id != id }
+            .min { $0.order < $1.order }
+        guard let first else { return }
+        place(id, before: first.id, in: task.status)
+    }
+
+    /// Takes one task off the board, keeping its time history. A running timer is stopped:
+    /// an archived task has no card to stop it from.
+    func archive(task id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        closeEntries(at: i)
+        tasks[i].archived = true
+        save()
     }
 
     func archive(column columnId: String) {
@@ -426,15 +502,26 @@ final class AppStore {
 
     var runningTasks: [TaskItem] { tasks.filter(\.isRunning) }
 
-    /// Dock badge while a timer runs: the time since the single running timer was started, or how many are running.
+    /// Dock badge: how many things wait for me, or (by choice) the running timer — the time since
+    /// the single running timer was started, or how many are running.
     /// Called every second by the ticker and right after a timer starts or stops.
     private func updateDockBadge() {
-        let running = runningTasks
-        let label: String? = switch running.count {
-        case 0: nil
-        // The current stretch only (since the last start), not the task's total.
-        case 1: Fmt.hm(running[0].entries.last { $0.end == nil }?.duration(now: now) ?? 0)
-        default: "\(running.count)"
+        forgetCleared()
+        let label: String?
+        switch notify.badge {
+        case .none:
+            label = nil
+        case .waiting:
+            let count = waitingCount
+            label = count == 0 ? nil : "\(count)"
+        case .timer:
+            let running = runningTasks
+            switch running.count {
+            case 0: label = nil
+            // The current stretch only (since the last start), not the task's total.
+            case 1: label = Fmt.hm(running[0].entries.last { $0.end == nil }?.duration(now: now) ?? 0)
+            default: label = "\(running.count)"
+            }
         }
         let tile = NSApplication.shared.dockTile
         if tile.badgeLabel != label { tile.badgeLabel = label }
@@ -454,23 +541,32 @@ final class AppStore {
         if tasks[i].isRunning {
             closeEntries(at: i)
         } else {
-            if singleTimer {
-                for k in tasks.indices where tasks[k].isRunning { closeEntries(at: k) }
-            }
-            tasks[i].entries.append(TimeEntry(start: Date()))
-            // Starting work on a not-started or done task moves it to the In progress column, if there is one.
-            let current = role(of: tasks[i].status)
-            if current == .backlog || current == .done,
-               let target = columns.first(where: { $0.role == .inProgress }) {
-                tasks[i].status = target.id
-                tasks[i].order = nextOrder
-                pushStatus(of: id)
-            }
-            tasks[i].archived = false
+            begin(i)
         }
         now = Date()
         updateDockBadge()
         save()
+    }
+
+    /// Starts the timer of the task at `i`, and offers to count from earlier when there is a gap.
+    private func begin(_ i: Int) {
+        // Before anything is stopped or started: afterwards there is no gap left to see.
+        let earlier = backdateOptions()
+        if singleTimer {
+            for k in tasks.indices where tasks[k].isRunning { closeEntries(at: k) }
+        }
+        let entry = TimeEntry(start: Date())
+        tasks[i].entries.append(entry)
+        // Starting work on a not-started or done task moves it to the In progress column, if there is one.
+        let current = role(of: tasks[i].status)
+        if current == .backlog || current == .done,
+           let target = columns.first(where: { $0.role == .inProgress }) {
+            tasks[i].status = target.id
+            tasks[i].order = nextOrder
+        }
+        tasks[i].archived = false
+        backdateOffer = earlier.isEmpty ? nil
+            : BackdateOffer(taskId: tasks[i].id, entryId: entry.id, options: earlier, made: Date())
     }
 
     func stopAll() {
@@ -680,50 +776,20 @@ final class AppStore {
 
     // MARK: Tracker status
 
-    /// Tells the tracker about a task that just entered a column, when its space maps that column to
-    /// a status. Runs in the background; a refusal is reported, and the card stays where it was put.
-    func pushStatus(of id: UUID) {
-        // A refusal belongs to the column the task was in then.
-        if let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].statusNote != nil {
-            tasks[i].statusNote = nil
-            save()
-        }
-        guard let task = task(id), let project = project(task.projectId),
-              TicketFetcher.canSetStatus(project.kind), TicketFetcher.canFetch(project: project, task: task),
-              let value = project.statusByColumn?[task.status], !value.isEmpty else { return }
-        let column = task.status
-        Task {
-            do {
-                // The status of the In progress column, as a stepping stone when the tracker has no
-                // direct step to the one wanted.
-                let via = columns.first { $0.role == .inProgress }.flatMap { project.statusByColumn?[$0.id] }
-                let name = try await TicketFetcher.setStatus(project: project, ref: task.ref, url: task.url,
-                                                             to: value, via: via)
-                // Moved on while the request was out: the later move sends its own status.
-                guard let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].status == column else { return }
-                if !name.isEmpty, tasks[i].remoteStatus != name {
-                    tasks[i].remoteStatus = name
-                    save()
-                }
-            } catch {
-                // On the card as well: a notification is easy to miss, or switched off in macOS.
-                if let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].status == column {
-                    tasks[i].statusNote = error.localizedDescription
-                    save()
-                }
-                Notifier.send(title: "Ticket status not changed",
-                              body: "\(task.displayRef) \(task.title)".trimmingCharacters(in: .whitespaces)
-                                + "\n\(error.localizedDescription)")
-            }
-        }
-    }
-
     /// Records what the tracker says about a ticket: its status and who it is assigned to.
     func setRemote(_ id: UUID, from detail: TicketDetail) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         var changed = false
         if let status = detail.status, !status.isEmpty, tasks[i].remoteStatus != status {
             tasks[i].remoteStatus = status
+            changed = true
+        }
+        if let type = detail.kindLabel, !type.isEmpty, tasks[i].remoteType != type {
+            tasks[i].remoteType = type
+            changed = true
+        }
+        if detail.tracksEstimate, tasks[i].estimateGap != detail.estimateGap {
+            tasks[i].estimateGap = detail.estimateGap
             changed = true
         }
         // A successful fetch with no assignee means the ticket is unassigned now.

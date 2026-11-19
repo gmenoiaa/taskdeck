@@ -200,6 +200,58 @@ enum Claude {
         Reply with the comment text only.
         """
 
+    static let estimateSystem = """
+        You estimate software tickets for the developer who will do the work. You get one ticket: \
+        its description and its comments.
+        - "Dev estimate" is the hours of development work only.
+        - "Estimate" is the hours for the whole ticket: development plus review, testing, deployment \
+        and communication. It is never lower than the dev estimate.
+        - If the description or a comment already states an estimate, a number of hours or days, or a \
+        budget, use that figure and say who gave it. A day is 8 hours.
+        - Otherwise judge from the scope described, and from work the comments show is already done \
+        or still open. Estimate the whole ticket, not only what is left.
+        - Use quarter hours. If the ticket says too little to estimate, answer 0 for both and say what is missing.
+        Reply with exactly three lines and nothing else:
+        ESTIMATE: <hours as a number>
+        DEV: <hours as a number>
+        WHY: <one or two plain sentences>
+        """
+
+    struct EstimateSuggestion {
+        var estimate: Double?
+        var dev: Double?
+        var why: String
+    }
+
+    /// Asks for an estimate from the ticket's description and comments. Private notes are not part
+    /// of `ticketText`, so they are not sent.
+    static func suggestEstimate(task: TaskItem, project: Project?, detail: TicketDetail,
+                                model: String, instructions: String) async throws -> EstimateSuggestion {
+        guard let key = apiKey() else {
+            throw RedmineError(message: "Set a Claude API key in Settings to get a suggestion.")
+        }
+        var answer = ""
+        for try await piece in stream(apiKey: key, model: model, system: system(estimateSystem, custom: instructions),
+                                      user: ticketText(task: task, project: project, detail: detail)) {
+            answer += piece
+        }
+        func value(_ label: String) -> String? {
+            answer.split(whereSeparator: \.isNewline)
+                .first { $0.uppercased().hasPrefix(label) }
+                .map { String($0.dropFirst(label.count)).trimmingCharacters(in: .whitespaces) }
+        }
+        func hours(_ label: String) -> Double? {
+            guard let text = value(label)?.replacingOccurrences(of: ",", with: "."),
+                  let number = Double(text.prefix { $0.isNumber || $0 == "." }), number > 0 else { return nil }
+            return number
+        }
+        let why = value("WHY:") ?? ""
+        if hours("ESTIMATE:") == nil && hours("DEV:") == nil && why.isEmpty {
+            throw RedmineError(message: "Claude's answer could not be read as an estimate.")
+        }
+        return EstimateSuggestion(estimate: hours("ESTIMATE:"), dev: hours("DEV:"), why: why)
+    }
+
     static func ticketText(task: TaskItem, project: Project?, detail: TicketDetail) -> String {
         var lines: [String] = []
         lines.append("Ticket: \([detail.kindLabel, task.displayRef].compactMap { $0 }.joined(separator: " "))")

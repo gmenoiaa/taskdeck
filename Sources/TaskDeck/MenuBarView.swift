@@ -38,6 +38,14 @@ struct MenuBarView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 10)
             Divider()
+            if store.backdateOffer != nil {
+                BackdateBanner().padding(8)
+            } else if store.forgotTimer, let since = store.untrackedSince {
+                Label("No timer running for \(Fmt.short(store.now.timeIntervalSince(since))). Pick a task to start one.",
+                      systemImage: "clock.badge.exclamationmark")
+                    .font(.callout).foregroundStyle(.orange)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+            }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {

@@ -142,7 +142,6 @@ extension AppStore {
             tasks[i].order = (tasks.map(\.order).max() ?? 0) + 1
         }
         save()
-        pushStatus(of: id)
     }
 
     /// One short question to Claude, only when the user turned it on: which of the space's

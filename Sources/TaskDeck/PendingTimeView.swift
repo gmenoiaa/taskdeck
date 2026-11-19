@@ -40,16 +40,46 @@ struct PendingTimeView: View {
     private func hours(_ rows: [Row]) -> Double { rows.compactMap { parse($0.hours) }.reduce(0, +) }
 
     private var allSelected: [Row] { groups.flatMap(selected) }
+    private func blank(_ text: String) -> Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Tasks with something selected to push: the ones that need a comment.
+    private var active: [Group] { groups.filter { !selected($0).isEmpty } }
+    private var missingComments: Int { active.filter { blank($0.comment) }.count }
+    private var generating: Bool { groups.contains(where: \.suggesting) }
     private var canPush: Bool {
-        !busy && !allSelected.isEmpty && allSelected.allSatisfy { (parse($0.hours) ?? 0) > 0 }
+        !busy && !generating && !allSelected.isEmpty && allSelected.allSatisfy { (parse($0.hours) ?? 0) > 0 }
+            && missingComments == 0
+    }
+
+    /// Writes the comments still missing, all at once. When none is missing it replaces them
+    /// all, so the same button also serves as "try again".
+    private func generateAll() async {
+        let targets = (missingComments > 0 ? active.filter { blank($0.comment) } : active).map(\.id)
+        await withTaskGroup(of: Void.self) { tasks in
+            for id in targets { tasks.addTask { await propose(id, auto: false) } }
+        }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Time to push").font(.title3.weight(.semibold))
-                Text("Tracked time that is not on Redmine yet. Each selected line becomes one time entry.")
-                    .foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Time to push").font(.title3.weight(.semibold))
+                    Text("Tracked time that is not on Redmine yet. Each selected line becomes one time entry.")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { Task { await generateAll() } } label: {
+                    HStack(spacing: 4) {
+                        ZStack {
+                            Image(systemName: "sparkles").opacity(generating ? 0 : 1)
+                            if generating { ProgressView().controlSize(.small) }
+                        }
+                        Text(missingComments == 0 && !active.isEmpty ? "Regenerate comments" : "Generate comments")
+                    }
+                }
+                .disabled(generating || busy || active.isEmpty)
+                .help(missingComments == 0 ? "Ask Claude to write every comment again"
+                                           : "Ask Claude to write the comments that are still empty")
             }
             .padding(14)
             Divider()
@@ -80,6 +110,10 @@ struct PendingTimeView: View {
                 }
                 .disabled(busy || groups.flatMap(\.rows).allSatisfy(\.done))
                 Spacer()
+                if missingComments > 0 && !generating {
+                    Text(missingComments == 1 ? "1 task needs a comment" : "\(missingComments) tasks need a comment")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(allSelected.isEmpty ? "Push"
                        : String(format: "Push %d · %.2f h", allSelected.count, hours(allSelected))) {
@@ -132,23 +166,9 @@ struct PendingTimeView: View {
                 }
             }
             if !g.rows.allSatisfy(\.done) {
-                HStack {
-                    TextField("Comment", text: group.comment,
-                              prompt: Text(g.suggesting ? "Claude is writing a proposal…" : "optional"))
-                        .disabled(g.suggesting)
-                    Button { Task { await propose(g.id, auto: false) } } label: {
-                        HStack(spacing: 4) {
-                            ZStack {
-                                Image(systemName: "sparkles").opacity(g.suggesting ? 0 : 1)
-                                if g.suggesting { ProgressView().controlSize(.small) }
-                            }
-                            Text("Generate")
-                        }
-                    }
-                    .controlSize(.small)
+                TextField("Comment", text: group.comment,
+                          prompt: Text(g.suggesting ? "Claude is writing a proposal…" : "required"))
                     .disabled(g.suggesting)
-                    .help("Ask Claude to propose a comment")
-                }
                 Picker("Activity", selection: group.activityId) {
                     Text("Redmine default").tag(Int?.none)
                     ForEach(activities[g.projectId] ?? []) { Text($0.name).tag(Int?.some($0.id)) }
@@ -247,7 +267,7 @@ struct PendingTimeView: View {
         for g in groups.indices {
             groups[g].error = nil
             let group = groups[g]
-            guard !selected(group).isEmpty else { continue }
+            guard !selected(group).isEmpty, !blank(group.comment) else { continue }
             guard let task = store.task(group.id), let issueId = Int(task.ref),
                   let project = store.project(group.projectId), let client = RedmineClient(project: project) else {
                 groups[g].error = "Set the space's base URL and API key in Settings → Spaces."

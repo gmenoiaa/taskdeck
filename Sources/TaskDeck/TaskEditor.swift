@@ -20,6 +20,11 @@ struct TaskEditor: View {
 
     private var isNew: Bool { store.task(task.id) == nil }
     private var project: Project? { store.project(task.projectId) }
+    /// A task with a ticket has the details sheet, where its notes and time already live.
+    /// Showing them here too made two places to edit the same thing.
+    private var hasDetails: Bool {
+        !isNew && TicketFetcher.canFetch(project: store.project(original.projectId), task: original)
+    }
 
     private var linkChanged: Bool {
         ticket.trimmingCharacters(in: .whitespaces) != original.ref || task.projectId != original.projectId
@@ -52,7 +57,7 @@ struct TaskEditor: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     HStack {
-                        TextField("Title", text: $task.title, prompt: Text("Task name"))
+                        TextField("Title", text: $task.title, prompt: Text(project.map { $0.kind != .other } == true ? "Fetched from the ticket if left empty" : "Task name"))
                         if let project, project.kind != .other {
                             Button {
                                 Task { await fetchTitle() }
@@ -67,13 +72,14 @@ struct TaskEditor: View {
                     if let fetchError {
                         Text(fetchError).font(.caption).foregroundStyle(.red)
                     }
-                    Picker("Column", selection: $task.status) {
-                        ForEach(store.columns) { Text($0.displayName).tag($0.id) }
+                    // No column: a card is placed and moved on the board. No notes on a new task
+                    // either: creating one is a ticket and a name, the rest comes after.
+                    if !isNew && !hasDetails {
+                        TextField("Notes", text: $task.notes, axis: .vertical).lineLimit(2...5)
                     }
-                    TextField("Notes", text: $task.notes, axis: .vertical).lineLimit(2...5)
                 }
 
-                if !isNew {
+                if !isNew && !hasDetails {
                     Section("Time — total \(Fmt.short(task.total(now: Date())))") {
                         ForEach(task.entries.sorted { $0.start > $1.start }) { entry in
                             TimeEntryRow(entry: Binding(get: { entry }, set: { edited in
@@ -96,8 +102,20 @@ struct TaskEditor: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(isNew ? "Create" : "Save") { saveAndClose() }
+                Button(isNew ? "Create" : "Save") {
+                    Task {
+                        // A ticket alone is enough: its title is fetched on the way out. If that
+                        // fails the sheet stays open with the reason, and Create then saves as is.
+                        if task.title.trimmingCharacters(in: .whitespaces).isEmpty, fetchError == nil,
+                           let project, project.kind != .other, !resolved.ref.isEmpty {
+                            await fetchTitle()
+                            if fetchError != nil { return }
+                        }
+                        saveAndClose()
+                    }
+                }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(fetching)
                     .disabled(task.title.trimmingCharacters(in: .whitespaces).isEmpty
                               && ticket.trimmingCharacters(in: .whitespaces).isEmpty)
             }
@@ -113,7 +131,7 @@ struct TaskEditor: View {
         } message: {
             Text("Its tracked time is deleted too. This cannot be undone.")
         }
-        .frame(minHeight: isNew ? 330 : 480)
+        .frame(minHeight: isNew || hasDetails ? 230 : 440)
     }
 
     private func addManual() {
@@ -131,6 +149,11 @@ struct TaskEditor: View {
         // The timer may have been started or stopped while the editor was open: start from the live
         // entries and apply only what was changed here (removed, added, start/end edited).
         if let live = store.task(task.id) {
+            // What this sheet does not show is not its to save: the card may have changed column,
+            // or its notes been edited in the details, while the sheet was open.
+            task.status = live.status
+            task.order = live.order
+            if hasDetails { task.notes = live.notes }
             let before = Dictionary(uniqueKeysWithValues: original.entries.map { ($0.id, $0) })
             let draft = Dictionary(uniqueKeysWithValues: task.entries.map { ($0.id, $0) })
             let kept = live.entries.compactMap { entry -> TimeEntry? in
@@ -145,6 +168,8 @@ struct TaskEditor: View {
         }
         // The tracker status may have been refreshed while the editor was open; a new ticket has none yet.
         task.remoteStatus = linkChanged ? nil : (store.task(task.id)?.remoteStatus ?? task.remoteStatus)
+        task.remoteType = linkChanged ? nil : (store.task(task.id)?.remoteType ?? task.remoteType)
+        task.estimateGap = linkChanged ? nil : (store.task(task.id)?.estimateGap ?? task.estimateGap)
         task.remoteAssignee = linkChanged ? nil : (store.task(task.id)?.remoteAssignee ?? task.remoteAssignee)
         task.explanation = linkChanged ? nil : (store.task(task.id)?.explanation ?? task.explanation)
         let needsStatus = task.remoteStatus == nil

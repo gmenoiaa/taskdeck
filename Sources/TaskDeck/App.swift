@@ -39,7 +39,8 @@ struct MenuBarLabel: View {
     var body: some View {
         let running = store.runningTasks
         HStack(spacing: 4) {
-            Image(systemName: running.isEmpty ? "timer" : "record.circle")
+            // A marked clock while it looks like work is going on with nothing tracked.
+            Image(systemName: !running.isEmpty ? "record.circle" : store.forgotTimer ? "clock.badge.exclamationmark" : "timer")
             if running.count == 1, let task = running.first {
                 // This sitting, like the card's clock and the Dock badge; not the task's whole time.
                 Text("\(task.displayRef) \(Fmt.hm(task.currentStretch(now: store.now)))".trimmingCharacters(in: .whitespaces))

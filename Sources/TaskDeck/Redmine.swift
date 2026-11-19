@@ -168,8 +168,25 @@ struct RedmineClient {
         let updated_on: String?
         let due_date: String?
         let journals: [Journal]?
-        /// The statuses the workflow lets the key's owner move this ticket to (Redmine 5 and later).
-        let allowed_statuses: [Named]?
+        let parent: Parent?
+        let custom_fields: [CustomField]?
+
+        struct Parent: Decodable { let id: Int }
+
+        struct CustomField: Decodable {
+            let id: Int
+            let name: String
+            /// Nil for an empty field, and for a list field, whose value is not a single text.
+            let value: String?
+
+            private enum CodingKeys: String, CodingKey { case id, name, value }
+            init(from decoder: Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                id = try c.decode(Int.self, forKey: .id)
+                name = try c.decode(String.self, forKey: .name)
+                value = try? c.decode(String.self, forKey: .value)
+            }
+        }
     }
 
     struct SpentEntry: Decodable, Identifiable {
@@ -182,7 +199,7 @@ struct RedmineClient {
 
     func issue(id: Int) async throws -> IssueDetail {
         struct Wrapper: Decodable { let issue: IssueDetail }
-        let data = try await send("/issues/\(id).json?include=journals,allowed_statuses")
+        let data = try await send("/issues/\(id).json?include=journals")
         return try JSONDecoder().decode(Wrapper.self, from: data).issue
     }
 

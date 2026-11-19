@@ -2,7 +2,7 @@ import Foundation
 
 /// Ticket data, regardless of the source tracker.
 struct TicketDetail {
-    struct Comment: Identifiable {
+    struct Comment: Identifiable, Codable {
         let id: String
         let author: String
         let date: String
@@ -13,6 +13,8 @@ struct TicketDetail {
     var subject: String
     var status: String?
     var meta: [(String, String)] = []
+    /// Pages behind some of the `meta` lines, by label: the parent ticket's, for one.
+    var links: [String: URL] = [:]
     var description = ""
     /// Description and comments are Markdown.
     var markdown = false
@@ -23,6 +25,29 @@ struct TicketDetail {
     /// Who the ticket is assigned to (several people on GitHub), or nil when unassigned.
     var assignee: String? { meta.first { $0.0 == "Assignee" }?.1 }
     var totalSpentHours: Double?
+    /// True for a tracker where a ticket is expected to carry an estimate (Redmine).
+    var tracksEstimate = false
+    /// Redmine's "Dev Estimate" custom field, when the ticket has one. Nil when it does not.
+    var devEstimate: DevEstimate?
+
+    struct DevEstimate: Codable, Hashable {
+        let fieldId: Int
+        var hours: Double?
+    }
+
+    /// What is missing, in words for a tooltip ("Estimate and dev estimate"), or nil when
+    /// nothing is, or when the tracker has no estimates.
+    var estimateGap: String? {
+        guard tracksEstimate else { return nil }
+        let noEstimate = (estimatedHours ?? 0) <= 0
+        let noDev = devEstimate.map { ($0.hours ?? 0) <= 0 } ?? false
+        switch (noEstimate, noDev) {
+        case (true, true): return "Estimate and dev estimate"
+        case (true, false): return "Estimate"
+        case (false, true): return "Dev estimate"
+        case (false, false): return nil
+        }
+    }
 }
 
 enum HTTP {
@@ -148,6 +173,12 @@ enum TicketFetcher {
         d.markdown = true
         d.estimatedHours = issue.estimated_hours
         d.totalSpentHours = issue.total_spent_hours ?? issue.spent_hours
+        d.tracksEstimate = true
+        // Found by name: the field's number differs from one Redmine to the next.
+        if let field = issue.custom_fields?.first(where: { $0.name.caseInsensitiveCompare("Dev Estimate") == .orderedSame }) {
+            let text = (field.value ?? "").replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)
+            d.devEstimate = TicketDetail.DevEstimate(fieldId: field.id, hours: Double(text))
+        }
         d.meta = compact([
             ("Project", issue.project?.name),
             ("Priority", issue.priority?.name),
@@ -157,7 +188,9 @@ enum TicketFetcher {
             ("Updated", RedmineDate.pretty(issue.updated_on)),
             ("Due", issue.due_date.map { RedmineDate.prettyDay($0) }),
             ("Done", issue.done_ratio.map { "\($0)%" }),
+            ("Parent", issue.parent.map { "#\($0.id)" }),
         ])
+        if let parent = issue.parent { d.links["Parent"] = URL(string: "\(base)/issues/\(parent.id)") }
         d.comments = (issue.journals ?? []).map {
             .init(id: "\($0.id)", author: $0.user?.name ?? "—",
                   date: RedmineDate.pretty($0.created_on), body: md($0.notes))
@@ -240,6 +273,7 @@ enum TicketFetcher {
             ("Labels", (f["labels"] as? [String])?.joined(separator: ", ")),
             ("Parent", (parent?["key"] as? String).map { [$0, parentSummary].compactMap { $0 }.joined(separator: " — ") }),
         ])
+        if let parentKey = parent?["key"] as? String { d.links["Parent"] = URL(string: "\(base)/browse/\(parentKey)") }
         let comments = ((f["comment"] as? [String: Any])?["comments"] as? [[String: Any]]) ?? []
         d.comments = comments.enumerated().map { i, c in
             let author = c["author"] as? [String: Any]
@@ -301,9 +335,17 @@ enum TicketFetcher {
         if isPR, ((issue["pull_request"] as? [String: Any])?["merged_at"] as? String) != nil { state = "merged" }
         if issue["draft"] as? Bool == true, state == "open" { state = "draft" }
 
-        var d = TicketDetail(kindLabel: isPR ? "Pull request" : "Issue",
+        // An issue type set in the organisation (Bug, Epic…) says more than plain "Issue".
+        let type = (issue["type"] as? [String: Any])?["name"] as? String
+        var d = TicketDetail(kindLabel: type ?? (isPR ? "Pull request" : "Issue"),
                              subject: (issue["title"] as? String) ?? "#\(p.number)",
                              status: state)
+        // An open ticket's real status is usually the one in its GitHub project; "open" says little.
+        // Without a token, or without the project scope, the plain state stays.
+        if state == "open", let board = try? await githubProjectStatus(project: project, url: url),
+           let current = board.current {
+            d.status = current
+        }
         d.description = (issue["body"] as? String) ?? ""
         d.markdown = true
         let assignees = ((issue["assignees"] as? [[String: Any]]) ?? []).compactMap { $0["login"] as? String }
