@@ -21,6 +21,8 @@ struct BoardView: View {
     @State private var search = ""
     /// Not kept between launches: a board that opens with cards missing looks broken.
     @State private var filters: Set<BoardFilter> = []
+    /// Only the cards of this goal. Not kept between launches, like the other filters.
+    @State private var goalFilter: UUID?
     @FocusState private var searching: Bool
     /// The card the keyboard acts on. Nil until an arrow key or a click picks one.
     @State private var selected: UUID?
@@ -32,12 +34,15 @@ struct BoardView: View {
         // Ticked filters add up: a card shows when any of them fits, so "working" and "your turn"
         // together give every card with an agent that is doing or waiting for something.
         guard filters.isEmpty || filters.contains(where: { fits(task, $0) }) else { return false }
+        // The goal narrows whatever else is ticked, rather than adding to it.
+        if let goalFilter, task.goalId != goalFilter { return false }
         let words = search.split(whereSeparator: \.isWhitespace)
         guard !words.isEmpty else { return true }
         let text = [task.title, task.displayRef, task.ref, task.notes, task.remoteStatus ?? "", task.remoteType ?? "",
                     task.estimateGap != nil ? "no estimate" : "",
                     task.due.map { "due " + Due.label($0) + (Due.daysLeft($0) < 0 ? " overdue" : "") } ?? "",
-                    task.remoteAssignee ?? "", store.project(task.projectId)?.name ?? ""]
+                    task.remoteAssignee ?? "", store.project(task.projectId)?.name ?? "",
+                    store.goal(task.goalId)?.name ?? ""]
             .joined(separator: "\n")
         return words.allSatisfy { text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
@@ -71,17 +76,47 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
                     get: { filters.contains(item) },
                     set: { on in if on { filters.insert(item) } else { filters.remove(item) } }))
             }
+            let goals = store.goals(in: filter).filter { $0.status != .done || $0.id == goalFilter }
+            if !goals.isEmpty {
+                Divider()
+                Picker("Goal", selection: $goalFilter) {
+                    Text("Any goal").tag(UUID?.none)
+                    ForEach(goals) { goal in
+                        Text(goal.displayName).tag(UUID?.some(goal.id))
+                    }
+                }
+            }
             Divider()
-            Button("Show All Cards") { filters = [] }.disabled(filters.isEmpty)
+            Button("Show All Cards") { filters = []; goalFilter = nil }.disabled(!filtering)
         } label: {
-            Image(systemName: filters.isEmpty ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
-                .foregroundStyle(filters.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.accent))
+            Image(systemName: filtering ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                .foregroundStyle(filtering ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.secondary))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(filters.isEmpty ? "Filter the board"
-              : "Showing only: " + BoardFilter.allCases.filter(filters.contains).map(\.label).joined(separator: ", "))
+        .help(filterHelp)
+    }
+
+    private var filtering: Bool { !filters.isEmpty || goalFilter != nil }
+
+    private var filterHelp: String {
+        var parts = BoardFilter.allCases.filter(filters.contains).map(\.label)
+        if let goal = store.goal(goalFilter) { parts.append("goal “\(goal.displayName)”") }
+        return parts.isEmpty ? "Filter the board" : "Showing only: " + parts.joined(separator: ", ")
+    }
+
+    /// From a card's goal chip: the goal in the Goals tab.
+    private func openGoal(_ id: UUID) {
+        goalSelected = id.uuidString
+        tab = "goals"
+    }
+
+    /// From the Goals tab: the board showing only that goal's cards.
+    private func showGoalOnBoard(_ id: UUID) {
+        filters = []
+        goalFilter = id
+        tab = "board"
     }
 
     /// Goes to where a waiting thing is dealt with: the session in Orca, the list of assigned
@@ -297,7 +332,8 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             if tab == "overview" {
                 OverviewView(spaceId: filter, onDetails: { details = $0 })
             } else if tab == "goals" {
-                GoalsView(spaceId: filter, selection: $goalSelected, onOpen: openCard, onNewTask: { newTask(goal: $0) })
+                GoalsView(spaceId: filter, selection: $goalSelected, onOpen: openCard, onNewTask: { newTask(goal: $0) },
+                          onShowOnBoard: showGoalOnBoard)
             } else {
                 GeometryReader { geo in
                     // Columns share the window width; with many columns they keep a readable width and scroll sideways.
@@ -315,7 +351,8 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
                                     onEdit: { editing = $0 },
                                     onLog: { logging = $0 },
                                     onDetails: { details = $0 },
-                                    onShowArchive: { showArchive = true }
+                                    onShowArchive: { showArchive = true },
+                                    onGoal: openGoal
                                 )
                                 .frame(width: width)
                                 .id(column.id)
@@ -375,6 +412,10 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         }
         .onChange(of: filters) { _, new in
             if !new.isEmpty, tab == "overview" { tab = "board" }
+        }
+        // A goal deleted while the board shows only its cards would leave the board empty.
+        .onChange(of: store.goals.map(\.id)) { _, ids in
+            if let goalFilter, !ids.contains(goalFilter) { self.goalFilter = nil }
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -789,6 +830,8 @@ struct AppCommands: Commands {
 private struct QueueBadge: View {
     @Environment(AppStore.self) private var store
     let task: TaskItem
+    /// The icon alone, for a tight row. Its words are in the tooltip.
+    var compact = false
     @State private var picking = false
 
     var body: some View {
@@ -816,7 +859,21 @@ private struct QueueBadge: View {
         }
     }
 
+    @ViewBuilder
     private func chip(_ text: String, icon: String, color: Color) -> some View {
+        if compact {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(color)
+                .frame(width: 20, height: 20)
+                .background(color.opacity(0.15), in: Circle())
+                .contentShape(Circle())
+        } else {
+            words(text, icon: icon, color: color)
+        }
+    }
+
+    private func words(_ text: String, icon: String, color: Color) -> some View {
         HStack(spacing: 3) {
             Image(systemName: icon).font(.system(size: 9, weight: .bold))
             Text(text).font(.caption.weight(.medium))
@@ -898,6 +955,7 @@ struct ColumnView: View {
     let onLog: (TaskItem) -> Void
     let onDetails: (TaskItem) -> Void
     let onShowArchive: () -> Void
+    var onGoal: (UUID) -> Void = { _ in }
     @State private var targeted = false
     /// The card a dragged task would be placed above, while one is held over it.
     @State private var dropAbove: UUID?
@@ -934,7 +992,8 @@ struct ColumnView: View {
                 LazyVStack(spacing: 8) {
                     ForEach(tasks) { task in
                         TaskCard(task: task, selected: selected == task.id, onSelect: { onSelect(task) },
-                                 onEdit: { onEdit(task) }, onLog: { onLog(task) }, onDetails: { onDetails(task) })
+                                 onEdit: { onEdit(task) }, onLog: { onLog(task) }, onDetails: { onDetails(task) },
+                                 onGoal: onGoal)
                             // A line in the gap above the card shows where the dragged one lands.
                             .overlay(alignment: .top) {
                                 if dropAbove == task.id {
@@ -999,6 +1058,8 @@ struct TaskCard: View {
     let onEdit: () -> Void
     let onLog: () -> Void
     let onDetails: () -> Void
+    /// Opens the task's goal in the Goals tab.
+    var onGoal: (UUID) -> Void = { _ in }
     @State private var hovering = false
     @State private var confirmDelete = false
     @State private var startingSession = false
@@ -1007,7 +1068,7 @@ struct TaskCard: View {
 
     /// Pills only: what needs doing on the left, the timer on the right. `level` is how hard the row
     /// is squeezed to fit the lane: 0 everything in words, 1 the session badge as an icon, 2 the
-    /// due date as an icon too, 3 the time not logged as an icon as well.
+    /// due date, the goal and the agent queue as icons too, 3 the time not logged as an icon as well.
     private func footer(project: Project?, running: Bool, level: Int) -> some View {
         let compact = level >= 1
         return HStack(spacing: 6) {
@@ -1054,8 +1115,15 @@ struct TaskCard: View {
                     .background(Color.orange.opacity(0.15), in: Circle())
                     .help("\(gap) not set in Redmine. Set it in the ticket details.")
             }
+            if let goal = store.goal(task.goalId) {
+                Button { onGoal(goal.id) } label: { GoalChip(goal: goal, compact: level >= 2) }
+                    .buttonStyle(.plain)
+                    .help("Goal: \(goal.displayName) — click to open it")
+                    // The one pill that may be cut short; the rest keeps its width.
+                    .layoutPriority(-1)
+            }
             if store.role(of: task.status) == .agents {
-                QueueBadge(task: task)
+                QueueBadge(task: task, compact: level >= 2)
             }
             if let session = store.headlineSession(of: task) {
                 SessionBadges(session: session, status: store.status(of: session), space: project,
@@ -1284,6 +1352,21 @@ struct TaskCard: View {
             }
             Divider()
             Menu("Due date") { DueMenuItems(task: task) { pickingDue = true } }
+            if !store.goals.isEmpty {
+                Menu("Goal") {
+                    // Finished goals are left out, except the one the task is already in.
+                    ForEach(store.goals.filter { $0.status != .done || $0.id == task.goalId }) { goal in
+                        Toggle(goal.displayName, isOn: Binding(
+                            get: { task.goalId == goal.id },
+                            set: { on in store.setGoal(task.id, on ? goal.id : nil) }))
+                    }
+                    if let goal = task.goalId {
+                        Divider()
+                        Button("Open Goal") { onGoal(goal) }
+                        Button("Remove from Goal") { store.setGoal(task.id, nil) }
+                    }
+                }
+            }
             Button("Edit…", action: onEdit)
             Button("Archive") { store.archive(task: task.id) }
             Button("Delete…", role: .destructive) { confirmDelete = true }
@@ -1350,6 +1433,32 @@ struct TodayBreakdown: View {
             Text(name)
             Spacer(minLength: 24)
             Text(Fmt.short(seconds)).monospacedDigit().foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// A card's goal: a small flag and the goal's name, or the flag alone where the row is tight.
+struct GoalChip: View {
+    let goal: Goal
+    var compact = false
+
+    var body: some View {
+        if compact {
+            Image(systemName: "flag.fill")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, height: 20)
+                .background(.quaternary, in: Circle())
+                .contentShape(Circle())
+        } else {
+            HStack(spacing: 3) {
+                Image(systemName: "flag.fill").font(.system(size: 9, weight: .bold))
+                Text(goal.displayName).font(.caption.weight(.medium)).lineLimit(1).truncationMode(.tail)
+            }
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .foregroundStyle(.secondary)
+            .background(.quaternary, in: Capsule())
+            .contentShape(Capsule())
         }
     }
 }

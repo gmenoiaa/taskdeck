@@ -11,6 +11,7 @@ struct GoalsView: View {
     /// Opens a task's ticket view, or its editor when it has no ticket.
     let onOpen: (TaskItem) -> Void
     let onNewTask: (UUID) -> Void
+    let onShowOnBoard: (UUID) -> Void
 
     private var goals: [Goal] { store.goals(in: spaceId) }
     private var selected: Goal? { goals.first { $0.id.uuidString == selection } ?? goals.first }
@@ -21,7 +22,7 @@ struct GoalsView: View {
             list(goals).frame(width: 250)
             Divider()
             if let goal = selected {
-                GoalDetail(goalId: goal.id, onOpen: onOpen, onNewTask: onNewTask)
+                GoalDetail(goalId: goal.id, onOpen: onOpen, onNewTask: onNewTask, onShowOnBoard: onShowOnBoard)
                     // A fresh view per goal, so a half-typed note does not follow to the next one.
                     .id(goal.id)
             } else {
@@ -91,12 +92,14 @@ private struct GoalDetail: View {
     let goalId: UUID
     let onOpen: (TaskItem) -> Void
     let onNewTask: (UUID) -> Void
+    let onShowOnBoard: (UUID) -> Void
 
     @State private var draft = ""
     @State private var picking = false
     @State private var editingItem: UUID?
     @State private var confirmDelete = false
     @State private var dropping = false
+    @State private var dropError: String?
     @FocusState private var naming: Bool
 
     var body: some View {
@@ -114,6 +117,27 @@ private struct GoalDetail: View {
                 .frame(maxWidth: .infinity)
             }
             .softScrollEdges()
+            // The whole pane takes drops: the notes section alone was too small a target, and
+            // a drop just beside it did nothing.
+            .overlay {
+                if dropping {
+                    RoundedRectangle(cornerRadius: Radius.column, style: .continuous)
+                        .strokeBorder(Theme.accent, lineWidth: 2)
+                        .background(Theme.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: Radius.column, style: .continuous))
+                        .overlay(Label("Add to “\(goal.displayName)”", systemImage: "plus.circle.fill")
+                            .font(.headline).foregroundStyle(Theme.accent))
+                        .padding(8)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onDrop(of: GoalDrop.types, isTargeted: $dropping) { providers in
+                Task {
+                    let (items, failure) = await GoalDrop.items(from: providers)
+                    if !items.isEmpty { store.updateGoal(goalId) { $0.items.append(contentsOf: items) } }
+                    dropError = failure?.localizedDescription
+                }
+                return true
+            }
             // A goal just made has no name: the cursor goes there.
             .onAppear { if goal.name.isEmpty { naming = true } }
             .confirmationDialog("Delete “\(goal.displayName)”?", isPresented: $confirmDelete) {
@@ -150,6 +174,9 @@ private struct GoalDetail: View {
                 }
                 .labelsHidden().fixedSize().tint(nil)
                 Menu {
+                    Button("Show on Board") { onShowOnBoard(goalId) }
+                        .disabled(store.tasks(of: goalId).allSatisfy(\.archived))
+                    Divider()
                     Button("Delete Goal…", role: .destructive) { confirmDelete = true }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -277,21 +304,18 @@ private struct GoalDetail: View {
                 Button("Add", action: addDraft)
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            Text("Links and files can also be dropped here. Notes are saved only on this Mac and are not sent to the AI.")
+            Text("Links, files and messages from Mail can also be dropped here. Notes are saved only on this Mac and are not sent to the AI.")
                 .font(.caption).foregroundStyle(.secondary)
+            if let dropError {
+                Label(dropError, systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
             ForEach(goal.items.sorted { $0.createdAt > $1.createdAt }) { item in
                 itemRow(item, space: space)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(dropping ? Theme.accent.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
-        .padding(-10)
-        .dropDestination(for: URL.self) { urls, _ in
-            guard !urls.isEmpty else { return false }
-            store.updateGoal(goalId) { goal in goal.items.append(contentsOf: urls.map(GoalItem.from)) }
-            return true
-        } isTargeted: { dropping = $0 }
+
     }
 
     private func addDraft() {
@@ -327,7 +351,10 @@ private struct GoalDetail: View {
                         Text(item.displayTitle).foregroundStyle(Theme.accent).lineLimit(1).truncationMode(.middle)
                     }
                     .buttonStyle(.plain)
-                    .help(item.url)
+                    .help(item.kind == .mail ? "Open in Mail" : item.url)
+                    if item.kind == .mail, !item.text.isEmpty {
+                        Text(item.text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
                 Text(item.createdAt, format: .dateTime.day().month().hour().minute())
                     .font(.caption2).foregroundStyle(.tertiary)
