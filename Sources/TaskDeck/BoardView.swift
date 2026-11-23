@@ -1098,70 +1098,71 @@ struct TaskCard: View {
     @State private var pickingDue = false
     @State private var removingWorktrees: [TaskWorktree] = []
 
-    /// Pills only: what needs doing on the left, the timer on the right. `level` is how hard the row
-    /// is squeezed to fit the lane: 0 everything in words, 1 the session badge as an icon, 2 the
-    /// due date, the goal and the agent queue as icons too, 3 the time not logged as an icon as well.
-    private func footer(project: Project?, running: Bool, level: Int) -> some View {
-        let compact = level >= 1
-        return HStack(spacing: 6) {
-            if project?.kind == .redmine, Int(task.ref) != nil, task.unloggedSeconds >= 60 {
-                // A compact one-line chip: an "upload" arrow and the time not yet logged.
-                Button(action: onLog) {
-                    if level >= 3 {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(Color.orange)
-                            .frame(width: 20, height: 20)
-                            .background(Color.orange.opacity(0.15), in: Circle())
-                            .contentShape(Circle())
-                    } else {
-                        HStack(spacing: 3) {
-                            Image(systemName: "arrow.up")
-                                .font(.system(size: 9, weight: .bold))
-                            Text(Fmt.short(task.unloggedSeconds))
-                                .font(.caption.weight(.medium))
-                                .monospacedDigit()
-                        }
-                        .lineLimit(1)
-                        .fixedSize()
-                        .padding(.horizontal, 7).padding(.vertical, 2)
-                        .foregroundStyle(Color.orange)
-                        .background(Color.orange.opacity(0.15), in: Capsule())
-                        .contentShape(Capsule())
-                    }
+    /// The card's pills, each in words: time not logged, due date, missing estimate, goal, agent
+    /// queue and session. Laid out by `footer`.
+    @ViewBuilder
+    private func pills(project: Project?) -> some View {
+        if project?.kind == .redmine, Int(task.ref) != nil, task.unloggedSeconds >= 60 {
+            // An "upload" arrow and the time not yet logged.
+            Button(action: onLog) {
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 9, weight: .bold))
+                    Text(Fmt.short(task.unloggedSeconds))
+                        .font(.caption.weight(.medium))
+                        .monospacedDigit()
                 }
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.horizontal, 7).padding(.vertical, 2)
+                .foregroundStyle(Color.orange)
+                .background(Color.orange.opacity(0.15), in: Capsule())
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("\(Fmt.short(task.unloggedSeconds)) not logged yet — click to log it to Redmine")
+        }
+        if let due = task.due, store.role(of: task.status) != .done {
+            Button { pickingDue = true } label: { DueChip(date: due) }
                 .buttonStyle(.plain)
-                .help("\(Fmt.short(task.unloggedSeconds)) not logged yet — click to log it to Redmine")
+                .help(Due.help(task) + " — click to change")
+        }
+        // Not on finished work: an estimate nobody set no longer needs setting.
+        if let gap = task.estimateGap, store.role(of: task.status) != .done {
+            HStack(spacing: 3) {
+                Image(systemName: "hourglass").font(.system(size: 9, weight: .bold))
+                Text(gap == "Estimate" ? "No estimate" : gap == "Dev estimate" ? "No dev estimate" : "No estimates")
+                    .font(.caption.weight(.medium))
             }
-            if let due = task.due, store.role(of: task.status) != .done {
-                Button { pickingDue = true } label: { DueChip(date: due, compact: level >= 2) }
-                    .buttonStyle(.plain)
-                    .help(Due.help(task) + " — click to change")
-            }
-            // Not on finished work: an estimate nobody set no longer needs setting.
-            if let gap = task.estimateGap, store.role(of: task.status) != .done {
-                Image(systemName: "hourglass")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color.orange)
-                    .frame(width: 20, height: 20)
-                    .background(Color.orange.opacity(0.15), in: Circle())
-                    .help("\(gap) not set in Redmine. Set it in the ticket details.")
-            }
-            if let goal = store.goal(task.goalId) {
-                Button { onGoal(goal.id) } label: { GoalChip(goal: goal, compact: level >= 2) }
-                    .buttonStyle(.plain)
-                    .help("Goal: \(goal.displayName) — click to open it")
-                    // The one pill that may be cut short; the rest keeps its width.
-                    .layoutPriority(-1)
-            }
-            if store.role(of: task.status) == .agents {
-                QueueBadge(task: task, compact: level >= 2)
-            }
-            if let session = store.headlineSession(of: task) {
-                SessionBadges(session: session, status: store.status(of: session), space: project,
-                              count: store.sessions(of: task).count, compact: compact)
-            }
-            Spacer(minLength: 0)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .foregroundStyle(Color.orange)
+            .background(Color.orange.opacity(0.15), in: Capsule())
+            .help("\(gap) not set in Redmine. Set it in the ticket details.")
+        }
+        if let goal = store.goal(task.goalId) {
+            Button { onGoal(goal.id) } label: { GoalChip(goal: goal) }
+                .buttonStyle(.plain)
+                .help("Goal: \(goal.displayName) — click to open it")
+        }
+        if store.role(of: task.status) == .agents {
+            QueueBadge(task: task)
+        }
+        if let session = store.headlineSession(of: task) {
+            SessionBadges(session: session, status: store.status(of: session), space: project,
+                          count: store.sessions(of: task).count)
+        }
+    }
+
+    /// Pills only: what needs doing on the left, the timer on the right. The pills always show in
+    /// words and go onto more lines when the lane is narrow; icons alone did not say enough.
+    private func footer(project: Project?, running: Bool) -> some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            // All the width the timer leaves. Without the frame the row would share it with the
+            // timer's side and wrap the pills at half the card.
+            FlowLayout(spacing: 6, lineSpacing: 5) { pills(project: project) }
+                .frame(maxWidth: .infinity, alignment: .leading)
             // An archived task has no card on the board to stop a timer from, so none starts here.
             if !task.archived {
                 Button {
@@ -1307,14 +1308,7 @@ struct TaskCard: View {
                 .help(task.notes)
             }
 
-            // The full row when it fits; in a narrow column the session badge shrinks to its icon.
-            // A row wider than the card is not cut off but pushes the card out of its column.
-            ViewThatFits(in: .horizontal) {
-                footer(project: project, running: running, level: 0)
-                footer(project: project, running: running, level: 1)
-                footer(project: project, running: running, level: 2)
-                footer(project: project, running: running, level: 3)
-            }
+            footer(project: project, running: running)
         }
         .padding(10)
         // No edit button on the card: it covered the assignee. Edit is in the right-click menu (and E).
