@@ -9,6 +9,9 @@ APP="build/TaskDeck.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# Notification Centre plays only sounds inside the app bundle, so the system's alert sounds are
+# copied in for the sound picker in Settings → Notifications.
+cp /System/Library/Sounds/*.aiff "$APP/Contents/Resources/" 2>/dev/null || true
 cp "$(swift build -c release --show-bin-path)/TaskDeck" "$APP/Contents/MacOS/TaskDeck"
 
 # SwiftPM stamps the binary with the deployment target (14.0) as its SDK version, which makes

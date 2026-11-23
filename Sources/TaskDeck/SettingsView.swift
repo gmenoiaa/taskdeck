@@ -173,6 +173,20 @@ private struct NotificationSettingsTab: View {
                     }
                 }
             }
+            Section("Sound") {
+                Picker("Sound", selection: $store.notify.sound) {
+                    Text("macOS default").tag("")
+                    Text("None").tag("none")
+                    if !Notifier.sounds.isEmpty { Divider() }
+                    ForEach(Notifier.sounds, id: \.self) { Text($0).tag($0) }
+                }
+                // Heard while choosing, so picking one does not need a test notification.
+                .onChange(of: store.notify.sound) { _, name in
+                    if !name.isEmpty, name != "none" { NSSound(named: name)?.play() }
+                }
+                Text("Used by every notification from TaskDeck. Focus and the settings in System Settings → Notifications still decide whether it plays.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Tickets and agents") {
                 Toggle("Ticket assigned to me", isOn: $store.notify.assigned)
                     .help("Checked every 15 minutes while the app is open. Tickets you ignored are not reported.")

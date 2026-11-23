@@ -22,7 +22,9 @@ final class AppStore {
     var agentQueueAskClaude = false
     @ObservationIgnored var processingQueue = false
     /// Which notifications are sent.
-    var notify = NotificationSettings()
+    var notify = NotificationSettings() {
+        didSet { Notifier.sound = notify.sound }
+    }
     /// What each session was doing at the last look, to notice when it stops or its pull request closes.
     @ObservationIgnored var sessionKinds: [String: Orca.Status.Kind] = [:]
     /// Tickets already seen as assigned to me; nil until the first look, which only takes note.
@@ -108,6 +110,8 @@ final class AppStore {
 
     init() {
         load()
+        // Said outright: whether `didSet` runs for values set during init is easy to get wrong.
+        Notifier.sound = notify.sound
         loadAssigned()
         Notifier.setUp()
         Notifier.onStart = { [weak self] id, since in self?.startTimer(id, from: since) }
