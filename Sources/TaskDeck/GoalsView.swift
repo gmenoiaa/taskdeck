@@ -13,6 +13,8 @@ struct GoalsView: View {
     let onNewTask: (UUID) -> Void
     let onShowOnBoard: (UUID) -> Void
 
+    @State private var importing = false
+
     private var goals: [Goal] { store.goals(in: spaceId) }
     private var selected: Goal? { goals.first { $0.id.uuidString == selection } ?? goals.first }
 
@@ -32,6 +34,7 @@ struct GoalsView: View {
                     Text("A goal groups the tasks, notes and links of something you are looking after.")
                 } actions: {
                     Button("New goal", action: add)
+                    Button("From a tracker epic…") { importing = true }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -39,6 +42,9 @@ struct GoalsView: View {
         // The first goal is shown when none is chosen; saying so keeps "New task" in step with it.
         .onAppear { if let goal = selected, selection != goal.id.uuidString { selection = goal.id.uuidString } }
         .onChange(of: selected?.id) { _, new in selection = new?.uuidString ?? "" }
+        .sheet(isPresented: $importing) {
+            GoalImportView(goalId: nil) { selection = $0.uuidString }.environment(store)
+        }
     }
 
     private func add() {
@@ -56,11 +62,17 @@ struct GoalsView: View {
                 .padding(8)
             }
             Divider()
-            Button(action: add) {
-                Label("New goal", systemImage: "plus").frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+            HStack {
+                Button(action: add) {
+                    Label("New goal", systemImage: "plus").frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Button { importing = true } label: { Image(systemName: "square.and.arrow.down") }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("New goal from a tracker's epic, parent issue or milestone")
             }
-            .buttonStyle(.plain)
             .padding(.horizontal, 16).padding(.vertical, 10)
         }
     }
@@ -100,6 +112,10 @@ private struct GoalDetail: View {
     @State private var confirmDelete = false
     @State private var dropping = false
     @State private var dropError: String?
+    @State private var updating = false
+    @State private var standing = ""
+    @State private var asking = false
+    @State private var askError: String?
     @FocusState private var naming: Bool
 
     var body: some View {
@@ -108,6 +124,7 @@ private struct GoalDetail: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     header(goal)
+                    if !tasks.isEmpty { standingBox(goal) }
                     taskSection(tasks)
                     materials(goal, space: space(of: tasks))
                 }
@@ -140,6 +157,9 @@ private struct GoalDetail: View {
             }
             // A goal just made has no name: the cursor goes there.
             .onAppear { if goal.name.isEmpty { naming = true } }
+            .sheet(isPresented: $updating) {
+                GoalImportView(goalId: goalId).environment(store)
+            }
             .confirmationDialog("Delete “\(goal.displayName)”?", isPresented: $confirmDelete) {
                 Button("Delete goal", role: .destructive) { store.delete(goal: goalId) }
                 Button("Cancel", role: .cancel) {}
@@ -174,6 +194,11 @@ private struct GoalDetail: View {
                 }
                 .labelsHidden().fixedSize().tint(nil)
                 Menu {
+                    if let source = goal.source {
+                        Button("Update from \(store.project(source.projectId)?.kind.label ?? "Tracker")…") { updating = true }
+                    } else {
+                        Button("Add Tasks from a Tracker Epic…") { updating = true }
+                    }
                     Button("Show on Board") { onShowOnBoard(goalId) }
                         .disabled(store.tasks(of: goalId).allSatisfy(\.archived))
                     Divider()
@@ -203,6 +228,72 @@ private struct GoalDetail: View {
                         .buttonStyle(.borderless).font(.caption)
                 }
             }
+        }
+    }
+
+    // MARK: Where it stands
+
+    /// Claude's account of the goal, streamed in as it is written; the last one is kept with the goal.
+    private func standingBox(_ goal: Goal) -> some View {
+        let text = asking ? standing : (goal.standing ?? "")
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                Text("Where it stands").font(.headline)
+                if let at = goal.standingAt, !asking {
+                    Text(at, format: .relative(presentation: .named))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if asking {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button(goal.standing == nil ? "Ask Claude" : "Refresh") { Task { await ask(goal) } }
+                        .buttonStyle(.borderless).font(.caption)
+                }
+            }
+            .foregroundStyle(Theme.accent)
+            if let askError {
+                Label(askError, systemImage: "exclamationmark.triangle")
+                    .font(.callout).foregroundStyle(.red).textSelection(.enabled)
+            }
+            if !text.isEmpty {
+                MarkdownView(text: text)
+            } else if asking {
+                Text("Claude is reading the goal's tickets…").foregroundStyle(.secondary)
+            } else {
+                Text("A short report on the goal from its tickets' status, time and comments.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            Text("Sent to Claude: the goal's name and description, its tickets as last read, and the titles of its links. Notes are not sent.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Radius.card, style: .continuous).strokeBorder(Theme.accent.opacity(0.25)))
+    }
+
+    private func ask(_ goal: Goal) async {
+        Claude.adoptLegacyKey(from: store.projects)
+        guard let key = Claude.apiKey() else {
+            askError = "Set your Claude API key in Settings → AI (⌘,)."
+            return
+        }
+        asking = true
+        askError = nil
+        standing = ""
+        defer { asking = false }
+        do {
+            let system = Claude.system(Claude.goalSystem, custom: store.aiInstructions)
+            let user = Claude.goalText(goal, store: store)
+            for try await chunk in Claude.stream(apiKey: key, model: store.claudeModel, system: system, user: user) {
+                standing += chunk
+            }
+            store.setStanding(goalId, standing)
+        } catch {
+            // The earlier report stays when a new one fails.
+            askError = "Could not get a report: \(error.localizedDescription)"
         }
     }
 

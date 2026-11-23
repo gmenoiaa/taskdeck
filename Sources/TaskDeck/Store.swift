@@ -507,6 +507,58 @@ final class AppStore {
         save()
     }
 
+    /// The board task for a tracker ticket, if there is one, archived ones included.
+    func task(project: UUID, ref: String) -> TaskItem? {
+        tasks.first { $0.projectId == project && $0.ref.caseInsensitiveCompare(ref) == .orderedSame }
+    }
+
+    /// Makes a goal from a tracker's epic (or adds to `goalId`): the epic's link goes in its notes and
+    /// links, the chosen children become its tasks. Children already on the board join the goal
+    /// where they are, even from another goal; new ones go to the first column, or to the done
+    /// column when the tracker says they are finished.
+    @discardableResult
+    func importEpic(_ epic: EpicTickets, project: Project, children: [EpicTickets.Child], into goalId: UUID?) -> UUID {
+        let id: UUID
+        if let goalId, let i = goals.firstIndex(where: { $0.id == goalId }) {
+            id = goalId
+            // The first epic added to a goal made by hand becomes its source, for later updates.
+            if goals[i].source == nil {
+                goals[i].source = GoalSource(projectId: project.id, ref: epic.ref, url: epic.url)
+                goals[i].items.append(GoalItem(kind: .link, title: "\(project.kind.label) \(epic.ref): \(epic.title)", url: epic.url))
+            }
+        } else {
+            var goal = Goal(name: epic.title)
+            goal.source = GoalSource(projectId: project.id, ref: epic.ref, url: epic.url)
+            goal.items = [GoalItem(kind: .link, title: "\(project.kind.label) \(epic.ref): \(epic.title)", url: epic.url)]
+            goals.append(goal)
+            id = goal.id
+        }
+        let done = columns.first { $0.role == .done }?.id ?? defaultColumnId
+        for child in children {
+            if let i = tasks.firstIndex(where: { $0.projectId == project.id && $0.ref.caseInsensitiveCompare(child.ref) == .orderedSame }) {
+                tasks[i].goalId = id
+                continue
+            }
+            var task = TaskItem(projectId: project.id, ref: child.ref, title: child.title, url: child.url,
+                                status: child.closed ? done : defaultColumnId,
+                                // GitHub's list only says open or closed; the refresh fetches the real state.
+                                remoteStatus: project.kind == .github ? nil : child.status, remoteType: child.type)
+            task.goalId = id
+            task.order = nextOrder
+            tasks.append(task)
+        }
+        save()
+        Task { await refreshRemoteStatuses() }
+        return id
+    }
+
+    func setStanding(_ goalId: UUID, _ text: String?) {
+        updateGoal(goalId) {
+            $0.standing = text
+            $0.standingAt = text == nil ? nil : Date()
+        }
+    }
+
     func setGoal(_ taskId: UUID, _ goalId: UUID?) {
         guard let i = tasks.firstIndex(where: { $0.id == taskId }), tasks[i].goalId != goalId else { return }
         tasks[i].goalId = goalId
