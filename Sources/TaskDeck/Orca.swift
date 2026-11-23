@@ -146,6 +146,20 @@ enum Orca {
         return session
     }
 
+    /// Deletes a worktree's checkout and takes it out of Orca. Without `force` git refuses a
+    /// checkout with uncommitted changes, so nothing that is not saved somewhere else goes with
+    /// it. `force` deletes those changes too. Either way Orca keeps any branch it cannot prove
+    /// is merged: `--force` does not reach the branch.
+    static func removeWorktree(id: String, force: Bool = false) async throws {
+        _ = try await run(["worktree", "rm", "--worktree", "id:\(id)"] + (force ? ["--force"] : []))
+    }
+
+    /// Whether a worktree is a git checkout this app may remove. A folder added to Orca as a
+    /// workspace is somebody's own directory, not a checkout made for one ticket.
+    static func canRemove(worktreeId: String) -> Bool {
+        !worktreeId.hasPrefix("folder:") && worktreeId.contains("::")
+    }
+
     /// The github.com accounts signed in to the `gh` command. Empty when gh is missing or says nothing.
     static func githubAccounts() async -> [String] {
         guard let gh = ghExecutable,

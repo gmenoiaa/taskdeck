@@ -5,6 +5,7 @@ struct ArchiveView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
+    @State private var removingWorktrees: [TaskWorktree] = []
     @State private var deleting: TaskItem?
 
     private func lastActivity(_ task: TaskItem) -> Date {
@@ -28,6 +29,17 @@ struct ArchiveView: View {
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(.quaternary, in: Capsule())
                 Spacer()
+                let leftovers = store.archivedWorktrees
+                if !store.removingWorktrees.isEmpty {
+                    ProgressView().controlSize(.small)
+                    Text("Removing worktrees…").font(.caption).foregroundStyle(.secondary)
+                } else if !leftovers.isEmpty {
+                    Button("Remove \(leftovers.count) Worktree\(leftovers.count == 1 ? "" : "s")…") {
+                        removingWorktrees = leftovers
+                    }
+                    .help("Remove the worktrees archived tasks left in Orca. One an agent is working in, "
+                          + "or that a task on the board also uses, is left alone.")
+                }
                 TextField("Filter", text: $search).textFieldStyle(.roundedBorder).frame(width: 180)
             }
             .padding(14)
@@ -56,6 +68,7 @@ struct ArchiveView: View {
             .actionBar()
         }
         .frame(width: 680, height: 560)
+        .removingWorktrees($removingWorktrees)
         .confirmationDialog(
             "Delete “\(deleting?.title ?? "")”?",
             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })
@@ -101,6 +114,14 @@ struct ArchiveView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 8)
+            let worktrees = store.archivedWorktrees.filter { $0.taskId == task.id }
+            if !worktrees.isEmpty, store.removingWorktrees.isEmpty {
+                Button { removingWorktrees = worktrees } label: {
+                    Label("\(worktrees.count)", systemImage: "arrow.triangle.branch")
+                }
+                .help(worktrees.count == 1 ? "Remove its worktree in Orca (\(worktrees[0].session.name))"
+                                           : "Remove its \(worktrees.count) worktrees in Orca")
+            }
             Button("Restore") { store.unarchive(task.id) }
                 .help("Put this task back on the board, in the column it was in")
             Button(role: .destructive) { deleting = task } label: { Image(systemName: "trash") }

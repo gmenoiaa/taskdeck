@@ -1096,6 +1096,7 @@ struct TaskCard: View {
     @State private var startingSession = false
     @State private var creatingTicket = false
     @State private var pickingDue = false
+    @State private var removingWorktrees: [TaskWorktree] = []
 
     /// Pills only: what needs doing on the left, the timer on the right. `level` is how hard the row
     /// is squeezed to fit the lane: 0 everything in words, 1 the session badge as an icon, 2 the
@@ -1381,6 +1382,12 @@ struct TaskCard: View {
             if let pr = store.sessions(of: task).compactMap({ store.status(of: $0)?.prURL }).last {
                 Button("Open pull request in browser") { Browser.open(pr, space: project) }
             }
+            let removable = store.removableSessions(of: task)
+            if !removable.isEmpty {
+                Button(removable.count == 1 ? "Remove Worktree in Orca…" : "Remove \(removable.count) Worktrees in Orca…") {
+                    removingWorktrees = removable.map { TaskWorktree(taskId: task.id, session: $0) }
+                }
+            }
             Divider()
             Menu("Move to") {
                 Button("Top of this lane") { store.moveToTop(task.id) }
@@ -1413,6 +1420,7 @@ struct TaskCard: View {
             }
             Button("Delete…", role: .destructive) { confirmDelete = true }
         }
+        .removingWorktrees($removingWorktrees)
         .sheet(isPresented: $creatingTicket) {
             CreateTicketView(taskId: task.id).environment(store)
         }

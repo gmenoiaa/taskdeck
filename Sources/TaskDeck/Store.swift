@@ -61,6 +61,8 @@ final class AppStore {
     /// Worktrees created in Orca that carry a task's ticket reference, by task id. Never saved: they
     /// are found again from Orca on every refresh.
     var linkedSessions: [UUID: [AgentSession]] = [:]
+    /// Worktree ids being removed in Orca right now, so the views can show it is under way.
+    var removingWorktrees: Set<String> = []
     /// Pull requests found by asking GitHub directly, by worktree id, for when Orca reports none.
     @ObservationIgnored private var pullRequests: [String: Orca.PullRequest] = [:]
     @ObservationIgnored private var pullRequestAsked: [String: Date] = [:]
@@ -792,7 +794,8 @@ final class AppStore {
             // The main checkout is the repository itself, not work on one ticket.
             let candidates = trees.filter { repoIds.contains($0.repoId) && !$0.isMain && !saved.contains($0.id) }
             guard !candidates.isEmpty else { continue }
-            for task in tasks where task.projectId == space.id && !task.archived && !task.ref.isEmpty {
+            // Archived tasks too: their worktrees are the ones left to clean up.
+            for task in tasks where task.projectId == space.id && !task.ref.isEmpty {
                 let found = candidates
                     .filter { Orca.mentions(task.ref, in: $0.name) || Orca.mentions(task.ref, in: $0.branch) }
                     .sorted { ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
@@ -879,6 +882,53 @@ final class AppStore {
         return sessions.last { status(of: $0)?.kind == .yourTurn }
             ?? sessions.last { status(of: $0)?.kind == .working }
             ?? sessions.last
+    }
+
+    /// The task's worktrees that can be removed now: Orca answered, the worktree is still there,
+    /// and no agent is working in it.
+    func removableSessions(of task: TaskItem) -> [AgentSession] {
+        sessions(of: task).filter { session in
+            guard let id = session.worktreeId, Orca.canRemove(worktreeId: id),
+                  let kind = status(of: session)?.kind else { return false }
+            return kind != .gone && kind != .working
+        }
+    }
+
+    /// Worktrees left behind by archived tasks. One that a task still on the board also points
+    /// to (the same ticket brought back) is that task's work, so it is left alone.
+    var archivedWorktrees: [TaskWorktree] {
+        let inUse = Set(tasks.filter { !$0.archived }.flatMap(sessions(of:)).compactMap(\.worktreeId))
+        var seen = Set<String>()
+        return tasks.filter(\.archived).flatMap { task in
+            removableSessions(of: task).compactMap { session -> TaskWorktree? in
+                guard let id = session.worktreeId, !inUse.contains(id), seen.insert(id).inserted else { return nil }
+                return TaskWorktree(taskId: task.id, session: session)
+            }
+        }
+    }
+
+    /// Removes worktrees in Orca one by one and forgets them here. Returns the ones Orca refused,
+    /// usually because of uncommitted changes, with its reason.
+    func removeWorktrees(_ items: [TaskWorktree], force: Bool = false) async -> [(item: TaskWorktree, reason: String)] {
+        var failures: [(item: TaskWorktree, reason: String)] = []
+        for item in items {
+            guard let id = item.session.worktreeId, !removingWorktrees.contains(id) else { continue }
+            removingWorktrees.insert(id)
+            defer { removingWorktrees.remove(id) }
+            do {
+                try await Orca.removeWorktree(id: id, force: force)
+                if let i = tasks.firstIndex(where: { $0.id == item.taskId }) {
+                    tasks[i].sessions?.removeAll { $0.worktreeId == id }
+                }
+                linkedSessions[item.taskId]?.removeAll { $0.worktreeId == id }
+                sessionStatuses?[id] = nil
+            } catch {
+                failures.append((item, error.localizedDescription))
+            }
+        }
+        save()
+        await refreshSessionStatuses(force: true)
+        return failures
     }
 
     /// Forgets a session here. The worktree and its branch stay in Orca.
