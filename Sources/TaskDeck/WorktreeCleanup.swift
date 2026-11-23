@@ -8,11 +8,12 @@ struct TaskWorktree: Hashable, Identifiable {
 }
 
 /// Asks before removing worktrees in Orca, removes them, and says which ones Orca refused.
-/// Set `pending` to start; it is emptied once the user answers.
+/// Those can then be removed anyway, changes and all. Set `pending` to start; it is emptied
+/// once the user answers.
 private struct RemoveWorktrees: ViewModifier {
     @Environment(AppStore.self) private var store
     @Binding var pending: [TaskWorktree]
-    @State private var failures: [String] = []
+    @State private var failures: [(item: TaskWorktree, reason: String)] = []
 
     private var title: String {
         pending.count == 1 ? "Remove the worktree “\(pending[0].session.name)”?" : "Remove \(pending.count) worktrees?"
@@ -27,6 +28,12 @@ private struct RemoveWorktrees: ViewModifier {
         lines.append("The checkout is deleted and the worktree leaves Orca. One with uncommitted changes is kept, "
                      + "and so is any branch Orca cannot tell is merged.")
         return lines.joined(separator: "\n\n")
+    }
+
+    private var failureMessage: String {
+        failures.map { "\($0.item.session.name): \($0.reason)" }.joined(separator: "\n\n")
+            + "\n\nRemoving anyway deletes the uncommitted changes with the checkout. "
+            + "Committed work stays on its branch, which Orca keeps unless it is merged."
     }
 
     func body(content: Content) -> some View {
@@ -44,9 +51,16 @@ private struct RemoveWorktrees: ViewModifier {
             }
             .alert(failures.count == 1 ? "A worktree was not removed" : "\(failures.count) worktrees were not removed",
                    isPresented: Binding(get: { !failures.isEmpty }, set: { if !$0 { failures = [] } })) {
-                Button("OK") { failures = [] }
+                Button("Remove Anyway", role: .destructive) {
+                    let items = failures.map(\.item)
+                    failures = []
+                    // Whatever still fails now (an agent's process holding a file, say) is reported
+                    // again, with the same offer.
+                    Task { failures = await store.removeWorktrees(items, force: true) }
+                }
+                Button("Keep", role: .cancel) { failures = [] }
             } message: {
-                Text(failures.joined(separator: "\n\n"))
+                Text(failureMessage)
             }
     }
 }

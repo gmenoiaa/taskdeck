@@ -907,23 +907,23 @@ final class AppStore {
         }
     }
 
-    /// Removes worktrees in Orca one by one and forgets them here. Returns a line for each one
-    /// Orca refused, usually because of uncommitted changes.
-    func removeWorktrees(_ items: [TaskWorktree]) async -> [String] {
-        var failures: [String] = []
+    /// Removes worktrees in Orca one by one and forgets them here. Returns the ones Orca refused,
+    /// usually because of uncommitted changes, with its reason.
+    func removeWorktrees(_ items: [TaskWorktree], force: Bool = false) async -> [(item: TaskWorktree, reason: String)] {
+        var failures: [(item: TaskWorktree, reason: String)] = []
         for item in items {
             guard let id = item.session.worktreeId, !removingWorktrees.contains(id) else { continue }
             removingWorktrees.insert(id)
             defer { removingWorktrees.remove(id) }
             do {
-                try await Orca.removeWorktree(id: id)
+                try await Orca.removeWorktree(id: id, force: force)
                 if let i = tasks.firstIndex(where: { $0.id == item.taskId }) {
                     tasks[i].sessions?.removeAll { $0.worktreeId == id }
                 }
                 linkedSessions[item.taskId]?.removeAll { $0.worktreeId == id }
                 sessionStatuses?[id] = nil
             } catch {
-                failures.append("\(item.session.name): \(error.localizedDescription)")
+                failures.append((item, error.localizedDescription))
             }
         }
         save()
