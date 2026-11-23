@@ -30,6 +30,9 @@ struct NotificationSettings: Codable, Equatable {
     var noTimerWeekends = false
     /// Moving a card to an In progress column starts its timer.
     var autoStartInProgress = true
+    /// The banner's sound: empty for the macOS default, `none` for silence, otherwise the name
+    /// of one of the system sounds bundled with the app ("Glass", "Submarine"…).
+    var sound = ""
 
     enum DockBadge: String, Codable { case waiting, timer, none }
 
@@ -53,6 +56,7 @@ struct NotificationSettings: Codable, Equatable {
         workTo = try c.decodeIfPresent(Int.self, forKey: .workTo) ?? 19
         noTimerWeekends = try c.decodeIfPresent(Bool.self, forKey: .noTimerWeekends) ?? false
         autoStartInProgress = try c.decodeIfPresent(Bool.self, forKey: .autoStartInProgress) ?? true
+        sound = try c.decodeIfPresent(String.self, forKey: .sound) ?? ""
     }
 }
 
@@ -240,6 +244,27 @@ enum Notifier {
         }
     }
 
+    /// Set by the store from `NotificationSettings.sound`.
+    static var sound = ""
+
+    /// The sounds that can be picked: the system's alert sounds that build.sh copied into the
+    /// bundle. Empty when running without the bundle.
+    static var sounds: [String] {
+        (Bundle.main.urls(forResourcesWithExtension: "aiff", subdirectory: nil) ?? [])
+            .map { $0.deletingPathExtension().lastPathComponent }
+            .sorted()
+    }
+
+    private static var notificationSound: UNNotificationSound? {
+        switch sound {
+        case "": return .default
+        case "none": return nil
+        // A sound no longer in the bundle would play nothing at all; the default is better.
+        case let name where sounds.contains(name): return UNNotificationSound(named: UNNotificationSoundName(name + ".aiff"))
+        default: return .default
+        }
+    }
+
     static let startAction = "start-timer"
     private static let startCategory = "no-timer"
     /// Set by the store: the reminder's "Start Timer" button.
@@ -264,7 +289,7 @@ enum Notifier {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
+        content.sound = notificationSound
         if let startTask, let since {
             content.categoryIdentifier = startCategory
             content.userInfo = ["task": startTask.uuidString, "since": since.timeIntervalSince1970]
