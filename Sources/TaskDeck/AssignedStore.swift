@@ -10,8 +10,9 @@ extension AppStore {
     func loadAssigned() {
         guard let data = try? Data(contentsOf: Self.assignedURL),
               let saved = try? JSONDecoder().decode([String: [RemoteTicket]].self, from: data) else { return }
+        // Pull requests saved before the list was limited to issues would show until the next refresh.
         assignedTickets = Dictionary(uniqueKeysWithValues: saved.compactMap { key, list in
-            UUID(uuidString: key).map { ($0, list) }
+            UUID(uuidString: key).map { ($0, list.filter { $0.status != "Open PR" }) }
         })
     }
 
