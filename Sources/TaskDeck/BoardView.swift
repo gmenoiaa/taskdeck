@@ -135,9 +135,21 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
 
     // MARK: Keyboard
 
-    /// The cards on screen, lane by lane, as filtered by space and search.
+    /// The cards on screen, lane by lane, as filtered by space and search, archived ones last.
     private var lanes: [(column: BoardColumn, tasks: [TaskItem])] {
-        store.columns.map { ($0, store.tasks(in: $0.id, project: filter).filter(matches)) }
+        store.columns.map { ($0, store.tasks(in: $0.id, project: filter).filter(matches) + archivedMatches(in: $0.id)) }
+    }
+
+    /// Archived tasks are off the board, but a search looks for them too: finding an old ticket
+    /// should not mean knowing it was archived and opening the archive. They show only while
+    /// something is typed, under the lane's own cards, most recently worked on first.
+    private func archivedMatches(in columnId: String) -> [TaskItem] {
+        guard !search.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
+        func lastActivity(_ task: TaskItem) -> Date { task.entries.map { $0.end ?? $0.start }.max() ?? task.createdAt }
+        return store.tasks
+            .filter { $0.archived && $0.status == columnId && (filter == nil || $0.projectId == filter) }
+            .filter(matches)
+            .sorted { lastActivity($0) > lastActivity($1) }
     }
 
     private func openCard(_ task: TaskItem) {
@@ -180,6 +192,8 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             return true
         }
         if flags == .command {
+            // Reordering is for the board's own cards; an archived one is restored from its menu.
+            guard !task.archived else { return false }
             switch event.keyCode {
             case 126: if row > 0 { store.place(task.id, before: cards[row - 1].id, in: task.status) }
             case 125: if row < cards.count - 1 {
@@ -202,7 +216,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             while l >= 0, l < lanes.count, lanes[l].tasks.isEmpty { l += step }
             if l >= 0, l < lanes.count { selected = lanes[l].tasks[min(row, lanes[l].tasks.count - 1)].id }
         case 36, 76: openCard(task)
-        case 49: store.toggleTimer(task.id)
+        case 49: if !task.archived { store.toggleTimer(task.id) }
         case 53: selected = nil
         case 51, 117: deleting = task
         default:
@@ -346,6 +360,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
                                 ColumnView(
                                     column: column,
                                     tasks: store.tasks(in: column.id, project: filter).filter(matches),
+                                    archived: archivedMatches(in: column.id),
                                     selected: selected,
                                     onSelect: { selected = $0.id },
                                     onEdit: { editing = $0 },
@@ -949,6 +964,8 @@ struct ColumnView: View {
     @Environment(AppStore.self) private var store
     let column: BoardColumn
     let tasks: [TaskItem]
+    /// Archived tasks that match the search, shown under the lane's cards.
+    var archived: [TaskItem] = []
     var selected: UUID? = nil
     var onSelect: (TaskItem) -> Void = { _ in }
     let onEdit: (TaskItem) -> Void
@@ -1020,13 +1037,27 @@ struct ColumnView: View {
                             store.place(id, before: nil, in: column.id)
                             return true
                         } isTargeted: { dropAtEnd = $0 }
+                    // No drop targets here: a card dropped among archived ones would land on the board anyway.
+                    if !archived.isEmpty {
+                        Label("Archived (\(archived.count))", systemImage: "archivebox")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 4)
+                            .help("Archived tasks that match the search")
+                        ForEach(archived) { task in
+                            TaskCard(task: task, selected: selected == task.id, onSelect: { onSelect(task) },
+                                     onEdit: { onEdit(task) }, onLog: { onLog(task) }, onDetails: { onDetails(task) },
+                                     onGoal: onGoal)
+                        }
+                    }
                 }
                 .padding(.bottom, 8)
-                .animation(.easeOut(duration: 0.15), value: tasks.map(\.id))
+                .animation(.easeOut(duration: 0.15), value: tasks.map(\.id) + archived.map(\.id))
             }
             // Keeps the card picked with the keyboard in view in a long lane.
             .onChange(of: selected) { _, new in
-                if let new, tasks.contains(where: { $0.id == new }) {
+                if let new, (tasks + archived).contains(where: { $0.id == new }) {
                     withAnimation(.easeOut(duration: 0.15)) { lane.scrollTo(new) }
                 }
             }
@@ -1130,40 +1161,43 @@ struct TaskCard: View {
                               count: store.sessions(of: task).count, compact: compact)
             }
             Spacer(minLength: 0)
-            Button {
-                store.toggleTimer(task.id)
-            } label: {
-                if running {
-                    // The clock sits in the button that stops it. It counts this sitting only; the
-                    // task's whole time is in the top row.
-                    HStack(spacing: 4) {
-                        Text(Fmt.clock(task.currentStretch(now: store.now)))
-                            .font(.caption.weight(.semibold)).monospacedDigit()
-                        Image(systemName: "pause.fill").font(.system(size: 9, weight: .bold))
+            // An archived task has no card on the board to stop a timer from, so none starts here.
+            if !task.archived {
+                Button {
+                    store.toggleTimer(task.id)
+                } label: {
+                    if running {
+                        // The clock sits in the button that stops it. It counts this sitting only; the
+                        // task's whole time is in the top row.
+                        HStack(spacing: 4) {
+                            Text(Fmt.clock(task.currentStretch(now: store.now)))
+                                .font(.caption.weight(.semibold)).monospacedDigit()
+                            Image(systemName: "pause.fill").font(.system(size: 9, weight: .bold))
+                        }
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .foregroundStyle(.white)
+                        .background(Theme.accent, in: Capsule())
+                        .contentShape(Capsule())
+                    } else {
+                        HStack(spacing: 3) {
+                            Image(systemName: "play.fill").font(.system(size: 9, weight: .bold))
+                            Text("Start").font(.caption.weight(.medium))
+                        }
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .foregroundStyle(Theme.accent)
+                        .background(Theme.accent.opacity(0.14), in: Capsule())
+                        .contentShape(Capsule())
                     }
-                    .lineLimit(1)
-                    .fixedSize()
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .foregroundStyle(.white)
-                    .background(Theme.accent, in: Capsule())
-                    .contentShape(Capsule())
-                } else {
-                    HStack(spacing: 3) {
-                        Image(systemName: "play.fill").font(.system(size: 9, weight: .bold))
-                        Text("Start").font(.caption.weight(.medium))
-                    }
-                    .lineLimit(1)
-                    .fixedSize()
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .foregroundStyle(Theme.accent)
-                    .background(Theme.accent.opacity(0.14), in: Capsule())
-                    .contentShape(Capsule())
                 }
+                .buttonStyle(.plain)
+                .help(running ? "This sitting, since the timer was started. Click to pause." : "Start timer")
+                // The running clock always shows, so it can always be stopped.
+                .opacity(hovering || running ? 1 : 0)
             }
-            .buttonStyle(.plain)
-            .help(running ? "This sitting, since the timer was started. Click to pause." : "Start timer")
-            // The running clock always shows, so it can always be stopped.
-            .opacity(hovering || running ? 1 : 0)
         }
     }
 
@@ -1301,6 +1335,8 @@ struct TaskCard: View {
                     .allowsHitTesting(false)
             }
         }
+        // Faded: found by a search, but not on the board.
+        .opacity(task.archived ? 0.6 : 1)
         .contentShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
@@ -1314,7 +1350,11 @@ struct TaskCard: View {
         .draggable(task.id.uuidString)
         .contextMenu {
             let link = task.url.isEmpty ? nil : URL(string: task.url)
-            Button(running ? "Pause timer" : "Start timer") { store.toggleTimer(task.id) }
+            if task.archived {
+                Button("Restore to Board") { store.unarchive(task.id) }
+            } else {
+                Button(running ? "Pause timer" : "Start timer") { store.toggleTimer(task.id) }
+            }
             // Only with something to log: otherwise the sheet opens empty.
             if project?.kind == .redmine, task.unloggedSeconds >= 60 {
                 Button("Log time to Redmine…", action: onLog)
@@ -1368,7 +1408,9 @@ struct TaskCard: View {
                 }
             }
             Button("Edit…", action: onEdit)
-            Button("Archive") { store.archive(task: task.id) }
+            if !task.archived {
+                Button("Archive") { store.archive(task: task.id) }
+            }
             Button("Delete…", role: .destructive) { confirmDelete = true }
         }
         .sheet(isPresented: $creatingTicket) {

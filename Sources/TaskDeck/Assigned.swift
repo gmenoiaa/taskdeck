@@ -105,27 +105,22 @@ extension TicketFetcher {
         } else if parts.count == 1 {
             scope = " org:\(parts[0])"
         }
-        // GitHub search requires is:issue or is:pr, so this takes two queries.
-        var items: [[String: Any]] = []
-        for type in ["is:issue", "is:pr"] {
-            let search = "\(type) is:open assignee:@me\(scope)"
-            let url = "\(api)/search/issues?q=\(q(search))&sort=updated&order=desc&per_page=100"
-            let json = try await HTTP.getJSON(url, headers: githubAuthHeaders(token: token)) as? [String: Any]
-            items += (json?["items"] as? [[String: Any]]) ?? []
-        }
-        items.sort { (($0["updated_at"] as? String) ?? "") > (($1["updated_at"] as? String) ?? "") }
+        // Issues only: a pull request is the work on a task, not a task to bring to the board.
+        let search = "is:issue is:open assignee:@me\(scope)"
+        let url = "\(api)/search/issues?q=\(q(search))&sort=updated&order=desc&per_page=100"
+        let json = try await HTTP.getJSON(url, headers: githubAuthHeaders(token: token)) as? [String: Any]
+        let items = (json?["items"] as? [[String: Any]]) ?? []
         return items.compactMap { item in
             guard let link = item["html_url"] as? String, let p = githubParts(link) else { return nil }
-            let isPR = item["pull_request"] != nil
             return RemoteTicket(
                 projectId: project.id,
                 ref: "\(p.repo)#\(p.number)",
                 title: (item["title"] as? String) ?? "",
                 url: link,
-                status: isPR ? "Open PR" : "Open issue",
+                status: "Open issue",
                 context: "\(p.owner)/\(p.repo)",
                 updated: RedmineDate.pretty(item["updated_at"] as? String),
-                // Only a type someone set (Bug, Epic…): the status already says issue or pull request.
+                // Only a type someone set (Bug, Epic…).
                 type: (item["type"] as? [String: Any])?["name"] as? String)
         }
     }
