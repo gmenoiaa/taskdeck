@@ -308,6 +308,8 @@ enum Orca {
             }
         }
 
+        var isAboutPullRequest: Bool { kind == .prOpen || kind == .prMerged || kind == .prClosed }
+
         var label: String {
             switch kind {
             case .working: return "Working"

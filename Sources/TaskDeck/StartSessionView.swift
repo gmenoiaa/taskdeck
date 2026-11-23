@@ -296,8 +296,11 @@ struct SessionBadge: View {
     let count: Int
     /// Icon only, in the status colour, for a card with no room for the word.
     var compact = false
+    /// Beside a `PullRequestBadge`: about the agent only, since the pull request has its own badge.
+    var agentOnly = false
 
     private var color: Color {
+        if agentOnly, status?.isAboutPullRequest == true { return .secondary }
         switch status?.kind {
         case .working: return .blue
         // Orange is the app's "needs you" colour, as on the not-logged-time chip.
@@ -311,13 +314,46 @@ struct SessionBadge: View {
     var body: some View {
         HStack(spacing: 3) {
             Image(systemName: "terminal").font(.system(size: 9, weight: .bold))
-            if compact {
+            if compact || (agentOnly && status?.isAboutPullRequest == true) {
+                // With a pull request the agent is idle: the icon is enough to say "the session".
                 EmptyView()
             } else if let status {
                 Text(status.label).font(.caption.weight(.medium))
             } else if count > 1 {
                 Text("\(count)").font(.caption.weight(.medium)).monospacedDigit()
             }
+        }
+        .lineLimit(1)
+        .fixedSize()
+        .padding(.horizontal, 7).padding(.vertical, 2)
+        .foregroundStyle(color)
+        .background(color.opacity(0.15), in: Capsule())
+    }
+}
+
+/// A chip for a session's pull request, apart from the session's own badge.
+struct PullRequestBadge: View {
+    let status: Orca.Status
+    var compact = false
+
+    private var color: Color {
+        switch status.kind {
+        case .prMerged: return .green
+        case .prClosed: return .secondary
+        default: return .purple
+        }
+    }
+
+    private var label: String {
+        // While the agent works or waits the status is about the agent, so the number is all
+        // that is known about the pull request.
+        status.isAboutPullRequest ? status.label : status.prNumber.map { "PR #\($0)" } ?? "PR"
+    }
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "arrow.triangle.pull").font(.system(size: 9, weight: .bold))
+            if !compact { Text(label).font(.caption.weight(.medium)) }
         }
         .lineLimit(1)
         .fixedSize()

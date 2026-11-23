@@ -473,6 +473,35 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
     }
 }
 
+/// A session's badges: its pull request, when it has one, and the session itself. Two badges so
+/// both stay one click away: the pull request opens on GitHub, the session in Orca.
+struct SessionBadges: View {
+    let session: AgentSession
+    let status: Orca.Status?
+    let space: Project?
+    let count: Int
+    var compact = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let status, let pr = status.prURL {
+                Button { Browser.open(pr, space: space) } label: {
+                    PullRequestBadge(status: status, compact: compact).contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("\(status.isAboutPullRequest ? status.detail : "A pull request is open for this worktree.") Click to open it.")
+            }
+            Button { Task { await Orca.reveal(session) } } label: {
+                SessionBadge(status: status, count: count, compact: compact, agentOnly: status?.prURL != nil)
+                    .fixedSize()
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Agent session “\(session.name)” in \(session.repoName). \(status?.isAboutPullRequest == true ? "" : status?.detail ?? "") Click to open it in Orca.")
+        }
+    }
+}
+
 /// The quick filters beside the search field.
 enum BoardFilter: String, CaseIterable, Identifiable {
     case timer, working, yourTurn, prOpen, session, noEstimate, due
@@ -1015,21 +1044,8 @@ struct TaskCard: View {
                 QueueBadge(task: task)
             }
             if let session = store.headlineSession(of: task) {
-                let status = store.status(of: session)
-                Button {
-                    // A badge that names a pull request opens it; the session is in the card's menu.
-                    if let pr = status?.badgeLink {
-                        Browser.open(pr, space: project)
-                    } else {
-                        Task { await Orca.reveal(session) }
-                    }
-                } label: {
-                    SessionBadge(status: status, count: store.sessions(of: task).count, compact: compact)
-                        .fixedSize()
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .help("Agent session “\(session.name)” in \(session.repoName). \(status?.detail ?? "") \(status?.badgeLink != nil ? "Click to open the pull request; right-click the card for the session." : "Click to open it in Orca.")")
+                SessionBadges(session: session, status: store.status(of: session), space: project,
+                              count: store.sessions(of: task).count, compact: compact)
             }
             Spacer(minLength: 0)
             Button {
