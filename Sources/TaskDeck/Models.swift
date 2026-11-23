@@ -183,6 +183,8 @@ struct TaskItem: Identifiable, Codable, Hashable {
     /// Nil while the task simply waits its turn.
     var queueNote: String?
     static let needsRepository = "repository"
+    /// The goal this task belongs to; a task is in one goal at most, so totals never count twice.
+    var goalId: UUID?
     var order: Double = 0
 
     var isRunning: Bool { entries.contains { $0.end == nil } }
@@ -214,6 +216,99 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var displayRef: String {
         guard !ref.isEmpty else { return "" }
         return ref.allSatisfy(\.isNumber) ? "#\(ref)" : ref
+    }
+}
+
+enum GoalStatus: String, Codable, CaseIterable, Identifiable {
+    case active, paused, done
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .active: return "Active"
+        case .paused: return "Paused"
+        case .done: return "Done"
+        }
+    }
+}
+
+/// Something kept with a goal that is not a task: a note, or a pointer to a page, mail or file.
+/// Mails and files are only pointed at; nothing is copied into the app.
+struct GoalItem: Identifiable, Codable, Hashable {
+    enum Kind: String, Codable {
+        case note, link, mail, document
+
+        var icon: String {
+            switch self {
+            case .note: return "note.text"
+            case .link: return "link"
+            case .mail: return "envelope"
+            case .document: return "doc"
+            }
+        }
+    }
+
+    var id = UUID()
+    var kind: Kind = .note
+    var title = ""
+    var url = ""
+    var text = ""
+    var createdAt = Date()
+
+    var displayTitle: String { title.trimmingCharacters(in: .whitespaces).isEmpty ? url : title }
+
+    /// What was typed, pasted or dropped: a single address becomes a link, mail or document by
+    /// where it points, and anything else is a note.
+    static func from(_ raw: String) -> GoalItem? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if !text.contains(where: \.isWhitespace), let url = URL(string: text), let scheme = url.scheme?.lowercased(),
+           ["http", "https", "file", "message", "mailto"].contains(scheme) {
+            return from(url)
+        }
+        return GoalItem(kind: .note, text: text)
+    }
+
+    static func from(_ url: URL) -> GoalItem {
+        let scheme = url.scheme?.lowercased() ?? ""
+        let host = (url.host ?? "").lowercased()
+        if url.isFileURL {
+            return GoalItem(kind: .document, title: url.lastPathComponent, url: url.absoluteString)
+        }
+        if scheme == "message" || scheme == "mailto" {
+            return GoalItem(kind: .mail, title: scheme == "mailto" ? String(url.absoluteString.dropFirst(7)) : "Mail message",
+                            url: url.absoluteString)
+        }
+        let kind: Kind
+        if host == "mail.google.com" || host.hasPrefix("outlook.") {
+            kind = .mail
+        } else if ["docs.google.com", "drive.google.com"].contains(host) || host.hasSuffix("sharepoint.com")
+                    || host.hasSuffix("dropbox.com") {
+            kind = .document
+        } else {
+            kind = .link
+        }
+        // No request is made for the page's own title: the address is tidied up and the user renames it.
+        let name = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        let path = url.path == "/" ? "" : url.path
+        return GoalItem(kind: kind, title: name + path, url: url.absoluteString)
+    }
+}
+
+/// Something the user looks after that spans several tasks, in any space, with the notes and
+/// links that go with it. Fields added later must be optional so saved files still load.
+struct Goal: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var name = ""
+    var summary = ""
+    var status: GoalStatus = .active
+    var due: Date?
+    var items: [GoalItem] = []
+    var createdAt = Date()
+
+    var displayName: String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? "Untitled goal" : trimmed
     }
 }
 

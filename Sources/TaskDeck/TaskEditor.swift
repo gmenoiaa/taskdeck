@@ -99,6 +99,16 @@ struct TaskEditor: View {
                     if let fetchError {
                         Text(fetchError).font(.caption).foregroundStyle(.red)
                     }
+                    // Finished goals are left out, except the one the task is already in.
+                    let goals = store.goals.filter { $0.status != .done || $0.id == task.goalId }
+                    if !goals.isEmpty {
+                        Picker("Goal", selection: $task.goalId) {
+                            Text("No goal").tag(UUID?.none)
+                            ForEach(goals) { goal in
+                                Text(goal.displayName).tag(UUID?.some(goal.id))
+                            }
+                        }
+                    }
                     // No column: a card is placed and moved on the board. No notes on a new task
                     // either: creating one is a ticket and a name, the rest comes after.
                     if !isNew && !hasDetails {
@@ -186,7 +196,8 @@ struct TaskEditor: View {
         } message: {
             Text("Its tracked time is deleted too. This cannot be undone.")
         }
-        .frame(minHeight: isLocal ? (isNew ? 600 : 720) : (isNew || hasDetails ? 230 : 440))
+        // The goal picker adds a row, once there is a goal to pick.
+        .frame(minHeight: (isLocal ? (isNew ? 600 : 720) : (isNew || hasDetails ? 230 : 440)) + (store.goals.isEmpty ? 0 : 40))
         // The task was saved before this opened; whatever happens there, this sheet's copy is old.
         .sheet(isPresented: $sendingToTracker, onDismiss: { dismiss() }) {
             CreateTicketView(taskId: task.id).environment(store)
