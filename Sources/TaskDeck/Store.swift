@@ -397,8 +397,11 @@ final class AppStore {
     }
 
     func move(_ id: UUID, to columnId: String) {
-        guard let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].status != columnId,
-              column(columnId) != nil else { return }
+        guard let i = tasks.firstIndex(where: { $0.id == id }), column(columnId) != nil else { return }
+        // A search shows archived cards too; moving one is putting it back on the board, even
+        // into the lane it was archived from.
+        guard tasks[i].status != columnId || tasks[i].archived else { return }
+        tasks[i].archived = false
         let from = role(of: tasks[i].status)
         tasks[i].status = columnId
         tasks[i].order = nextOrder
