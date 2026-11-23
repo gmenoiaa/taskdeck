@@ -219,6 +219,7 @@ struct TaskEditor: View {
             // or its notes been edited in the details, while the sheet was open.
             task.status = live.status
             task.order = live.order
+            task.dueDate = live.dueDate
             if hasDetails { task.notes = live.notes }
             let before = Dictionary(uniqueKeysWithValues: original.entries.map { ($0.id, $0) })
             let draft = Dictionary(uniqueKeysWithValues: task.entries.map { ($0.id, $0) })
@@ -236,6 +237,7 @@ struct TaskEditor: View {
         task.remoteStatus = linkChanged ? nil : (store.task(task.id)?.remoteStatus ?? task.remoteStatus)
         task.remoteType = linkChanged ? nil : (store.task(task.id)?.remoteType ?? task.remoteType)
         task.estimateGap = linkChanged ? nil : (store.task(task.id)?.estimateGap ?? task.estimateGap)
+        task.remoteDue = linkChanged ? nil : (store.task(task.id)?.remoteDue ?? task.remoteDue)
         task.remoteAssignee = linkChanged ? nil : (store.task(task.id)?.remoteAssignee ?? task.remoteAssignee)
         task.explanation = linkChanged ? nil : (store.task(task.id)?.explanation ?? task.explanation)
         let needsStatus = task.remoteStatus == nil
