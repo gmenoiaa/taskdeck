@@ -7,16 +7,39 @@ struct TaskEditor: View {
     private let original: TaskItem
     @State private var task: TaskItem
     @State private var ticket: String
+    /// On: the task follows a ticket that already exists. Off: the ticket does not exist yet, so
+    /// the task gets a description of its own and can create the ticket later.
+    @State private var existingTicket: Bool
     @State private var fetching = false
+    /// The last title filled in from the ticket. A title that still equals it was not typed by the
+    /// user, so another ticket number may replace it.
+    @State private var fetchedTitle: String?
     @State private var fetchError: String?
     @State private var manualMinutes = ""
     @State private var confirmDelete = false
+    @State private var description: String
+    @State private var sendingToTracker = false
 
     init(task: TaskItem) {
         original = task
         _task = State(initialValue: task)
         _ticket = State(initialValue: task.ref)
+        // A blank new task starts on "existing", the common case; a task saved without a ticket
+        // was a new one.
+        _existingTicket = State(initialValue: !task.ref.isEmpty || (task.title.isEmpty && task.draft == nil))
+        _description = State(initialValue: task.draft ?? "")
     }
+
+    /// The task lives in the app, with a description of its own that can later become a ticket in
+    /// the space's tracker.
+    private var isLocal: Bool { !existingTicket }
+    /// The ticket typed, or none while the switch says there is no ticket yet. What was typed is
+    /// kept, so switching back does not lose it.
+    private var ticketInput: String { existingTicket ? ticket.trimmingCharacters(in: .whitespaces) : "" }
+    private var tracked: Bool { project.map { $0.kind != .other } ?? false }
+    /// Only for a task already saved without a ticket: creating one is a step of its own, taken
+    /// when the user wants it, never on the way out of this sheet.
+    private var canSend: Bool { !isNew && original.ref.isEmpty && isLocal && tracked }
 
     private var isNew: Bool { store.task(task.id) == nil }
     private var project: Project? { store.project(task.projectId) }
@@ -27,12 +50,12 @@ struct TaskEditor: View {
     }
 
     private var linkChanged: Bool {
-        ticket.trimmingCharacters(in: .whitespaces) != original.ref || task.projectId != original.projectId
+        ticketInput != original.ref || task.projectId != original.projectId
     }
 
     private var resolved: (ref: String, url: String) {
         guard linkChanged else { return (original.ref, original.url) }
-        return LinkResolver.resolve(ticket, kind: project?.kind ?? .other, base: project?.baseURL ?? "")
+        return LinkResolver.resolve(ticketInput, kind: project?.kind ?? .other, base: project?.baseURL ?? "")
     }
 
     var body: some View {
@@ -45,20 +68,24 @@ struct TaskEditor: View {
                             Text("\(p.name) · \(p.kind.label)").tag(UUID?.some(p.id))
                         }
                     }
-                    TextField("Ticket", text: $ticket, prompt: Text((project?.kind ?? .other).ticketHint))
+                    Toggle("Existing ticket", isOn: $existingTicket)
+                        .help("Off when the ticket does not exist yet: write its description here and create it in the tracker later.")
+                    if existingTicket {
+                        TextField("Ticket", text: $ticket, prompt: Text((project?.kind ?? .other).ticketHint))
+                    }
                     if !resolved.url.isEmpty {
                         LabeledContent("Link") {
                             Text(resolved.url).font(.caption).foregroundStyle(.secondary)
                                 .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                         }
-                    } else if project != nil, project?.baseURL.isEmpty == true, !ticket.isEmpty,
-                              !ticket.lowercased().hasPrefix("http") {
+                    } else if project != nil, project?.baseURL.isEmpty == true, !ticketInput.isEmpty,
+                              !ticketInput.lowercased().hasPrefix("http") {
                         Text("Set the space's base URL (or paste the full link) to generate the link.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     HStack {
-                        TextField("Title", text: $task.title, prompt: Text(project.map { $0.kind != .other } == true ? "Fetched from the ticket if left empty" : "Task name"))
-                        if let project, project.kind != .other {
+                        TextField("Title", text: $task.title, prompt: Text(tracked && !isLocal ? "Fetched from the ticket if left empty" : "Task name"))
+                        if let project, project.kind != .other, !isLocal {
                             Button {
                                 Task { await fetchTitle() }
                             } label: {
@@ -76,6 +103,15 @@ struct TaskEditor: View {
                     // either: creating one is a ticket and a name, the rest comes after.
                     if !isNew && !hasDetails {
                         TextField("Notes", text: $task.notes, axis: .vertical).lineLimit(2...5)
+                    }
+                }
+
+                if isLocal {
+                    Section {
+                        DescriptionField(text: $description)
+                    }
+                    Section("Draft with Claude") {
+                        DraftWithClaude(title: $task.title, description: $description, tracker: project?.kind)
                     }
                 }
 
@@ -101,6 +137,14 @@ struct TaskEditor: View {
                     Button("Delete…", role: .destructive) { confirmDelete = true }
                 }
                 Spacer()
+                if canSend, let project {
+                    Button("Create in \(project.kind.label)…") {
+                        save()
+                        sendingToTracker = true
+                    }
+                    .disabled(task.title.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .help("Saves the task, then creates its ticket in \(project.kind.label).")
+                }
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(isNew ? "Create" : "Save") {
                     Task {
@@ -117,11 +161,22 @@ struct TaskEditor: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(fetching)
                     .disabled(task.title.trimmingCharacters(in: .whitespaces).isEmpty
-                              && ticket.trimmingCharacters(in: .whitespaces).isEmpty)
+                              && ticketInput.isEmpty)
             }
             .padding(14)
         }
-        .frame(width: 500)
+        .frame(width: isLocal ? 560 : 500)
+        // The title follows the ticket as it is typed, after a short pause so a number half typed
+        // is not looked up.
+        .task(id: ticketInput) {
+            guard linkChanged, let project, project.kind != .other, !resolved.ref.isEmpty,
+                  project.kind != .redmine || Int(resolved.ref) != nil else { return }
+            let current = task.title.trimmingCharacters(in: .whitespaces)
+            guard current.isEmpty || current == fetchedTitle else { return }
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            await fetchTitle(quiet: true)
+        }
         .confirmationDialog("Delete “\(original.title.isEmpty ? original.displayRef : original.title)”?", isPresented: $confirmDelete) {
             Button("Delete task", role: .destructive) {
                 store.delete(task: task.id)
@@ -131,7 +186,11 @@ struct TaskEditor: View {
         } message: {
             Text("Its tracked time is deleted too. This cannot be undone.")
         }
-        .frame(minHeight: isNew || hasDetails ? 230 : 440)
+        .frame(minHeight: isLocal ? (isNew ? 600 : 720) : (isNew || hasDetails ? 230 : 440))
+        // The task was saved before this opened; whatever happens there, this sheet's copy is old.
+        .sheet(isPresented: $sendingToTracker, onDismiss: { dismiss() }) {
+            CreateTicketView(taskId: task.id).environment(store)
+        }
     }
 
     private func addManual() {
@@ -142,10 +201,17 @@ struct TaskEditor: View {
     }
 
     private func saveAndClose() {
+        save()
+        dismiss()
+    }
+
+    private func save() {
         let r = resolved
         task.ref = r.ref
         task.url = r.url
         task.title = task.title.trimmingCharacters(in: .whitespaces)
+        // With a ticket, the tracker's description is the one that counts.
+        task.draft = r.ref.isEmpty && !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? description : nil
         // The timer may have been started or stopped while the editor was open: start from the live
         // entries and apply only what was changed here (removed, added, start/end edited).
         if let live = store.task(task.id) {
@@ -177,18 +243,27 @@ struct TaskEditor: View {
         let needsStatus = task.remoteStatus == nil
         store.upsert(task)
         if needsStatus { Task { await store.refreshRemoteStatuses() } }
-        dismiss()
     }
 
-    private func fetchTitle() async {
+    /// `quiet`: started by typing. Then the title is only replaced if the user has not typed one
+    /// meanwhile, and nothing is applied once the ticket field has changed again.
+    private func fetchTitle(quiet: Bool = false) async {
         guard let project else { return }
         let r = resolved
         fetching = true
         fetchError = nil
         defer { fetching = false }
         do {
-            task.title = try await TicketFetcher.fetch(project: project, ref: r.ref, url: r.url).subject
+            let subject = try await TicketFetcher.fetch(project: project, ref: r.ref, url: r.url).subject
+            if quiet {
+                guard resolved.ref == r.ref else { return }
+                let current = task.title.trimmingCharacters(in: .whitespaces)
+                guard current.isEmpty || current == fetchedTitle else { return }
+            }
+            task.title = subject
+            fetchedTitle = subject
         } catch {
+            guard !quiet || resolved.ref == r.ref else { return }
             fetchError = error.localizedDescription
         }
     }

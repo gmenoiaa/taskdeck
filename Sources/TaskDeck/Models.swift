@@ -113,6 +113,10 @@ struct Project: Identifiable, Codable, Hashable {
     var githubOrg: String?
     /// The `gh` account this project's agent sessions use. Empty or nil means gh's active account.
     var githubAccount: String?
+    /// Where the last ticket created from the app went in this space's tracker: a Redmine project
+    /// id, a Jira project key or a GitHub "owner/repo", and the type chosen there. Preselected next time.
+    var createTarget: String?
+    var createType: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }
@@ -149,6 +153,10 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var status: String = "todo"
     var entries: [TimeEntry] = []
     var notes = ""
+    /// The ticket description written for a task that has no ticket yet (Markdown). Unlike `notes`
+    /// it is meant to leave the app: it goes to Claude and, when the ticket is created, to the
+    /// tracker. Cleared once the task has a ticket, whose own description then counts.
+    var draft: String?
     var createdAt = Date()
     var archived = false
     /// The ticket's own status in its tracker (e.g. "Assigned", "In Review", "merged"), when known.

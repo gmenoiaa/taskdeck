@@ -252,6 +252,71 @@ enum Claude {
         return EstimateSuggestion(estimate: hours("ESTIMATE:"), dev: hours("DEV:"), why: why)
     }
 
+    // MARK: Draft a new ticket
+
+    static let draftSystem = """
+        You turn a developer's rough note into a ticket for an issue tracker. You get the note, which \
+        may include pasted context such as messages, logs or code, and sometimes a title and a \
+        description the developer already wrote.
+
+        Write a short, specific title and a clear description.
+        - Write in the language of the developer's note, not of the pasted context. If the note \
+        itself has no clear language, use the language of the context.
+        - Title: at most 80 characters, no ticket number, no trailing period. Name the change or the \
+        problem, not the activity ("Checkout fails for saved cards", not "Investigate checkout").
+        - Description in Markdown, as short as the note allows. Use these sections when the note \
+        gives something for them, and leave out the rest: context or problem, what to do (a list), \
+        done when (a list). For a bug, add steps to reproduce and expected versus actual behaviour \
+        when the note gives them.
+        - Keep technical names, error messages, links and numbers exactly as written. Put code \
+        identifiers in backticks and longer logs or code in fenced blocks, shortened to the lines \
+        that matter.
+        - Use only what the note and context say. Do not invent requirements, causes, estimates or \
+        people. If something important is missing, end with a short "Open questions" list.
+        - If the developer already wrote a title or a description, keep what is right in it and \
+        improve the rest.
+        Reply in exactly this form and nothing else:
+        TITLE: <the title>
+        ---
+        <the description>
+        """
+
+    struct TicketDraft {
+        var title: String
+        var description: String
+    }
+
+    /// Writes a ticket's title and description from the user's note. Only the note, the title and
+    /// the description typed in the form are sent: a task's private notes are not.
+    static func draftTicket(note: String, title: String, description: String, tracker: TrackerKind?,
+                            model: String, instructions: String) async throws -> TicketDraft {
+        guard let key = apiKey() else {
+            throw RedmineError(message: "Set a Claude API key in Settings to draft with Claude.")
+        }
+        var user: [String] = []
+        if let tracker, tracker != .other { user.append("Tracker: \(tracker.label)") }
+        user.append("<note>\n\(note)\n</note>")
+        if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            user.append("<current_title>\n\(title)\n</current_title>")
+        }
+        if !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            user.append("<current_description>\n\(description)\n</current_description>")
+        }
+        var answer = ""
+        for try await piece in stream(apiKey: key, model: model, system: system(draftSystem, custom: instructions),
+                                      user: user.joined(separator: "\n\n")) {
+            answer += piece
+        }
+        let lines = answer.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "\n")
+        guard let first = lines.first, first.uppercased().hasPrefix("TITLE:") else {
+            throw RedmineError(message: "Claude's answer could not be read as a ticket.")
+        }
+        var rest = Array(lines.dropFirst())
+        if rest.first?.trimmingCharacters(in: .whitespaces) == "---" { rest.removeFirst() }
+        return TicketDraft(title: first.dropFirst("TITLE:".count).trimmingCharacters(in: .whitespaces),
+                           description: rest.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     static func ticketText(task: TaskItem, project: Project?, detail: TicketDetail) -> String {
         var lines: [String] = []
         lines.append("Ticket: \([detail.kindLabel, task.displayRef].compactMap { $0 }.joined(separator: " "))")
