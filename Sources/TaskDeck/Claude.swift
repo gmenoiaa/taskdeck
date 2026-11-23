@@ -183,6 +183,104 @@ enum Claude {
     """
 
     /// The ticket as plain text for the model: every field, the full description and all comments.
+    // MARK: Where a goal stands
+
+    static let goalSystem = """
+    You write a short status report on one goal for the developer who looks after it. A goal \
+    groups several tickets, from one or more issue trackers. You get the goal, its tickets with \
+    their board column, tracker status, time tracked and agent sessions, and the description and \
+    latest comments of the tickets the developer has opened in the app.
+
+    Use plain English: short sentences, active voice, common words, one idea per sentence. Keep \
+    ticket numbers, names and technical terms exactly as written.
+
+    Use only what you are given. Do not invent progress, dates or reasons. When the tickets do not \
+    say something, say that it is not known. A ticket in a done column, or closed or merged in its \
+    tracker, is finished.
+
+    Answer in Markdown with these sections, in this order. Leave out a section that has nothing to say:
+
+    ## Where it stands
+    Two or three sentences: how far the goal is, and whether it is on track for its due date if it has one.
+
+    ## Done
+    Finished tickets, as a short list.
+
+    ## In progress
+    Tickets being worked on, and what each one waits for.
+
+    ## Blocked or waiting
+    Tickets that wait for a person, a decision or another ticket, and on whom.
+
+    ## Next steps
+    What the developer should do next, most important first. At most five items.
+
+    Start directly with the first heading.
+    """
+
+    /// The goal as plain text for the model. Private notes are left out: the goal's own notes and
+    /// every task's notes. The goal's links, mails and documents go by their titles only.
+    @MainActor
+    static func goalText(_ goal: Goal, store: AppStore) -> String {
+        func clip(_ text: String, _ limit: Int) -> String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.count > limit ? String(trimmed.prefix(limit)) + " […]" : trimmed
+        }
+        let now = Date()
+        var out = "Goal: \(goal.displayName)\nStatus: \(goal.status.label)\nToday: \(now.formatted(date: .complete, time: .omitted))\n"
+        if let due = goal.due { out += "Due: \(due.formatted(date: .complete, time: .omitted))\n" }
+        if !goal.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            out += "About the goal:\n\(clip(goal.summary, 2000))\n"
+        }
+        let pointers = goal.items.filter { $0.kind != .note }
+        if !pointers.isEmpty {
+            out += "\nLinks, mails and documents kept with the goal (titles only):\n"
+            for item in pointers { out += "- \(item.kind.rawValue): \(item.displayTitle)\n" }
+        }
+        let tasks = store.tasks(of: goal.id)
+        out += "\nTickets (\(tasks.count)):\n"
+        for task in tasks {
+            let space = store.project(task.projectId)
+            out += "\n### \(task.displayRef.isEmpty ? "(no ticket)" : task.displayRef) \(task.title)\n"
+            var facts: [String] = []
+            if let space { facts.append("Tracker: \(space.kind.label) (\(space.name))") }
+            facts.append("Board column: " + (task.archived ? "archived" : store.column(task.status)?.displayName ?? task.status)
+                         + (store.isDone(task) ? " (finished)" : ""))
+            if let status = task.remoteStatus { facts.append("Tracker status: \(status)") }
+            if let type = task.remoteType { facts.append("Type: \(type)") }
+            if let assignee = task.remoteAssignee { facts.append("Assigned to: \(assignee)") }
+            if let due = task.due { facts.append("Due: \(due.formatted(date: .abbreviated, time: .omitted))") }
+            let total = task.total(now: now)
+            if total >= 60 { facts.append("Time tracked: \(Fmt.short(total))" + (task.isRunning ? " (timer running)" : "")) }
+            for session in store.sessions(of: task) {
+                if let status = store.status(of: session) {
+                    let state: String
+                    switch status.kind {
+                    case .working: state = "working"
+                    case .yourTurn: state = "waiting for the developer"
+                    case .prOpen: state = "pull request open"
+                    case .prMerged: state = "pull request merged"
+                    case .prClosed: state = "pull request closed"
+                    case .idle: state = "idle"
+                    case .gone: state = "ended"
+                    }
+                    facts.append("Agent session: \(state)")
+                }
+            }
+            out += facts.map { "- \($0)" }.joined(separator: "\n") + "\n"
+            // Only what was already read from the tracker; nothing is fetched for this.
+            if let detail = TicketCache.load(task.id)?.detail {
+                if !detail.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out += "Description:\n\(clip(detail.description, 1500))\n"
+                }
+                for comment in detail.comments.suffix(3) {
+                    out += "Comment by \(comment.author), \(comment.date):\n\(clip(comment.body, 600))\n"
+                }
+            }
+        }
+        return out
+    }
+
     static let logCommentSystem = """
         You write the comment of a time entry (work log) that a developer adds to a ticket in an issue tracker.
         You get the ticket (title, status, description, comments), sometimes the developer's user name and \

@@ -295,6 +295,12 @@ struct GoalItem: Identifiable, Codable, Hashable {
     }
 }
 
+struct GoalSource: Codable, Hashable {
+    var projectId: UUID
+    var ref: String
+    var url: String
+}
+
 /// Something the user looks after that spans several tasks, in any space, with the notes and
 /// links that go with it. Fields added later must be optional so saved files still load.
 struct Goal: Identifiable, Codable, Hashable {
@@ -305,6 +311,12 @@ struct Goal: Identifiable, Codable, Hashable {
     var due: Date?
     var items: [GoalItem] = []
     var createdAt = Date()
+    /// The tracker ticket the goal was imported from (epic, parent issue or milestone), so it can
+    /// be read again for children added since.
+    var source: GoalSource?
+    /// Claude's last account of where the goal stands (Markdown), and when it was written.
+    var standing: String?
+    var standingAt: Date?
 
     var displayName: String {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
