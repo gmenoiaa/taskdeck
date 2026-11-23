@@ -38,7 +38,7 @@ enum TicketCache {
 extension TicketDetail: Codable {
     private enum CodingKeys: String, CodingKey {
         case kindLabel, subject, status, meta, links, description, markdown, comments, estimatedHours, totalSpentHours
-        case tracksEstimate, devEstimate
+        case tracksEstimate, devEstimate, dueDay
     }
 
     init(from decoder: Decoder) throws {
@@ -57,6 +57,7 @@ extension TicketDetail: Codable {
         totalSpentHours = try c.decodeIfPresent(Double.self, forKey: .totalSpentHours)
         tracksEstimate = try c.decodeIfPresent(Bool.self, forKey: .tracksEstimate) ?? false
         devEstimate = try c.decodeIfPresent(DevEstimate.self, forKey: .devEstimate)
+        dueDay = try c.decodeIfPresent(String.self, forKey: .dueDay)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -73,5 +74,6 @@ extension TicketDetail: Codable {
         try c.encodeIfPresent(totalSpentHours, forKey: .totalSpentHours)
         try c.encode(tracksEstimate, forKey: .tracksEstimate)
         try c.encodeIfPresent(devEstimate, forKey: .devEstimate)
+        try c.encodeIfPresent(dueDay, forKey: .dueDay)
     }
 }

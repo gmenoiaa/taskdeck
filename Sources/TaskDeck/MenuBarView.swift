@@ -84,6 +84,8 @@ struct MenuBarView: View {
             .padding(10)
         }
         .frame(width: 340)
+        // In the background the sessions are asked about less often: ask now, the menu is being read.
+        .task { await store.refreshSessionStatuses() }
     }
 
     private func sectionTitle(_ text: String) -> some View {
@@ -110,6 +112,23 @@ struct MenuTaskRow: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 4)
+            if let session = store.headlineSession(of: task) {
+                let status = store.status(of: session)
+                Button {
+                    // As on the card: a badge that names a pull request opens it, any other the session.
+                    if let pr = status?.badgeLink {
+                        Browser.open(pr, space: project)
+                    } else {
+                        Task { await Orca.reveal(session) }
+                    }
+                } label: {
+                    SessionBadge(status: status, count: store.sessions(of: task).count, compact: true)
+                        .fixedSize()
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("\(status?.detail ?? "Agent session “\(session.name)”.") \(status?.badgeLink != nil ? "Click to open the pull request." : "Click to open it in Orca.")")
+            }
             Text(running ? Fmt.clock(task.currentStretch(now: store.now)) : Fmt.short(task.total(now: Date())))
                 .font(.callout).monospacedDigit()
                 .foregroundStyle(running ? Theme.accent : Color.secondary)

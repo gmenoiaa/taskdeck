@@ -48,6 +48,12 @@ struct MenuBarLabel: View {
             } else if running.count > 1 {
                 Text("\(running.count) timers")
             }
+            // An agent of a task being timed stopped and waits: the reason to open the menu.
+            if running.contains(where: { task in
+                store.sessions(of: task).contains { store.status(of: $0)?.kind == .yourTurn }
+            }) {
+                Image(systemName: "bell.badge.fill")
+            }
         }
     }
 }

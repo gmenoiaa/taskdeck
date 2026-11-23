@@ -17,6 +17,8 @@ struct BoardView: View {
     /// The window's tab: "overview" (the first page) or "board". Remembered between launches.
     @AppStorage("mainTab") private var tab = "overview"
     @State private var search = ""
+    /// Not kept between launches: a board that opens with cards missing looks broken.
+    @State private var filters: Set<BoardFilter> = []
     @FocusState private var searching: Bool
     /// The card the keyboard acts on. Nil until an arrow key or a click picks one.
     @State private var selected: UUID?
@@ -25,16 +27,62 @@ struct BoardView: View {
 
     /// Every word typed has to appear somewhere in the task, in any order, ignoring case and accents.
     private func matches(_ task: TaskItem) -> Bool {
+        // Ticked filters add up: a card shows when any of them fits, so "working" and "your turn"
+        // together give every card with an agent that is doing or waiting for something.
+        guard filters.isEmpty || filters.contains(where: { fits(task, $0) }) else { return false }
         let words = search.split(whereSeparator: \.isWhitespace)
         guard !words.isEmpty else { return true }
         let text = [task.title, task.displayRef, task.ref, task.notes, task.remoteStatus ?? "", task.remoteType ?? "",
                     task.estimateGap != nil ? "no estimate" : "",
+                    task.due.map { "due " + Due.label($0) + (Due.daysLeft($0) < 0 ? " overdue" : "") } ?? "",
                     task.remoteAssignee ?? "", store.project(task.projectId)?.name ?? ""]
             .joined(separator: "\n")
         return words.allSatisfy { text.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 
-/// Goes to where a waiting thing is dealt with: the session in Orca, the list of assigned
+private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
+        func session(_ kind: Orca.Status.Kind) -> Bool {
+            store.sessions(of: task).contains { store.status(of: $0)?.kind == kind }
+        }
+        switch filter {
+        case .timer: return task.isRunning
+        case .working: return session(.working)
+        case .yourTurn: return session(.yourTurn)
+        case .prOpen: return session(.prOpen)
+        case .session: return !store.sessions(of: task).isEmpty
+        case .noEstimate: return task.estimateGap != nil
+        // Finished work is not due any more, whatever its date says.
+        case .due: return store.role(of: task.status) != .done && task.due.map { Due.daysLeft($0) <= 7 } == true
+        }
+    }
+
+    /// How many cards on the board, in the current space, a filter would show.
+    private func count(_ filter: BoardFilter) -> Int {
+        store.columns.reduce(0) { $0 + store.tasks(in: $1.id, project: self.filter).filter { fits($0, filter) }.count }
+    }
+
+    private var filterMenu: some View {
+        Menu {
+            ForEach(BoardFilter.allCases) { item in
+                let n = count(item)
+                Toggle(n == 0 ? item.label : "\(item.label) (\(n))", isOn: Binding(
+                    get: { filters.contains(item) },
+                    set: { on in if on { filters.insert(item) } else { filters.remove(item) } }))
+            }
+            Divider()
+            Button("Show All Cards") { filters = [] }.disabled(filters.isEmpty)
+        } label: {
+            Image(systemName: filters.isEmpty ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                .foregroundStyle(filters.isEmpty ? AnyShapeStyle(.secondary) : AnyShapeStyle(Theme.accent))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(filters.isEmpty ? "Filter the board"
+              : "Showing only: " + BoardFilter.allCases.filter(filters.contains).map(\.label).joined(separator: ", "))
+    }
+
+    /// Goes to where a waiting thing is dealt with: the session in Orca, the list of assigned
     /// tickets, or the card on the board (found by searching for it).
     private func open(_ item: AppStore.WaitingItem) {
         if item.kind == .assigned { showImport = true; return }
@@ -315,6 +363,9 @@ struct BoardView: View {
         .onChange(of: search) { _, new in
             if !new.trimmingCharacters(in: .whitespaces).isEmpty, tab == "overview" { tab = "board" }
         }
+        .onChange(of: filters) { _, new in
+            if !new.isEmpty, tab == "overview" { tab = "board" }
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Picker("Space", selection: $filter) {
@@ -367,9 +418,10 @@ struct BoardView: View {
                             .buttonStyle(.plain).foregroundStyle(.secondary)
                             .help("Clear the search")
                     }
+                    filterMenu
                 }
                 .padding(.horizontal, 10)
-                .frame(width: 190)
+                .frame(width: 210)
             }
             // Keeps the search field a pill of its own. Without it the buttons that follow share
             // its glass whenever there is no time-to-push button in between.
@@ -417,6 +469,23 @@ struct BoardView: View {
         }
         .sheet(isPresented: $showImport) {
             ImportView().environment(store)
+        }
+    }
+}
+
+/// The quick filters beside the search field.
+enum BoardFilter: String, CaseIterable, Identifiable {
+    case timer, working, yourTurn, prOpen, session, noEstimate, due
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .timer: return "Timer running"
+        case .working: return "Agent working"
+        case .yourTurn: return "Your turn"
+        case .prOpen: return "Pull request open"
+        case .session: return "Has an agent session"
+        case .noEstimate: return "No estimate"
+        case .due: return "Due within a week or overdue"
         }
     }
 }
@@ -890,45 +959,47 @@ struct TaskCard: View {
     @State private var hovering = false
     @State private var confirmDelete = false
     @State private var startingSession = false
+    @State private var pickingDue = false
 
-    private func footer(project: Project?, running: Bool, compact: Bool) -> some View {
-        HStack(spacing: 8) {
-            if running {
-                // The clock counts this sitting only. The task's whole time is in the top row:
-                // this row has no room for both, and side by side they pushed the card wider
-                // than its column.
-                Text(Fmt.clock(task.currentStretch(now: store.now)))
-                    .font(.callout.weight(.semibold)).monospacedDigit()
-                    .foregroundStyle(Theme.accent)
-                    .fixedSize()
-                    .help("This sitting, since the timer was started")
-            } else if task.total(now: Date()) >= 60 {
-                // Under a minute reads as "0m", which says nothing: leave it out.
-                Text(Fmt.short(task.total(now: Date())))
-                    .font(.callout).monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    // Without this a crowded row squeezes the time into one character per line.
-                    .fixedSize()
-            }
+    /// Pills only: what needs doing on the left, the timer on the right. `level` is how hard the row
+    /// is squeezed to fit the lane: 0 everything in words, 1 the session badge as an icon, 2 the
+    /// due date as an icon too, 3 the time not logged as an icon as well.
+    private func footer(project: Project?, running: Bool, level: Int) -> some View {
+        let compact = level >= 1
+        return HStack(spacing: 6) {
             if project?.kind == .redmine, Int(task.ref) != nil, task.unloggedSeconds >= 60 {
                 // A compact one-line chip: an "upload" arrow and the time not yet logged.
                 Button(action: onLog) {
-                    HStack(spacing: 3) {
+                    if level >= 3 {
                         Image(systemName: "arrow.up")
-                            .font(.system(size: 9, weight: .bold))
-                        Text(Fmt.short(task.unloggedSeconds))
-                            .font(.caption.weight(.medium))
-                            .monospacedDigit()
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Color.orange)
+                            .frame(width: 20, height: 20)
+                            .background(Color.orange.opacity(0.15), in: Circle())
+                            .contentShape(Circle())
+                    } else {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 9, weight: .bold))
+                            Text(Fmt.short(task.unloggedSeconds))
+                                .font(.caption.weight(.medium))
+                                .monospacedDigit()
+                        }
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .foregroundStyle(Color.orange)
+                        .background(Color.orange.opacity(0.15), in: Capsule())
+                        .contentShape(Capsule())
                     }
-                    .lineLimit(1)
-                    .fixedSize()
-                    .padding(.horizontal, 7).padding(.vertical, 2)
-                    .foregroundStyle(Color.orange)
-                    .background(Color.orange.opacity(0.15), in: Capsule())
-                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .help("\(Fmt.short(task.unloggedSeconds)) not logged yet — click to log it to Redmine")
+            }
+            if let due = task.due, store.role(of: task.status) != .done {
+                Button { pickingDue = true } label: { DueChip(date: due, compact: level >= 2) }
+                    .buttonStyle(.plain)
+                    .help(Due.help(task) + " — click to change")
             }
             // Not on finished work: an estimate nobody set no longer needs setting.
             if let gap = task.estimateGap, store.role(of: task.status) != .done {
@@ -963,13 +1034,36 @@ struct TaskCard: View {
             Button {
                 store.toggleTimer(task.id)
             } label: {
-                Image(systemName: running ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.title2)
+                if running {
+                    // The clock sits in the button that stops it. It counts this sitting only; the
+                    // task's whole time is in the top row.
+                    HStack(spacing: 4) {
+                        Text(Fmt.clock(task.currentStretch(now: store.now)))
+                            .font(.caption.weight(.semibold)).monospacedDigit()
+                        Image(systemName: "pause.fill").font(.system(size: 9, weight: .bold))
+                    }
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .foregroundStyle(.white)
+                    .background(Theme.accent, in: Capsule())
+                    .contentShape(Capsule())
+                } else {
+                    HStack(spacing: 3) {
+                        Image(systemName: "play.fill").font(.system(size: 9, weight: .bold))
+                        Text("Start").font(.caption.weight(.medium))
+                    }
+                    .lineLimit(1)
+                    .fixedSize()
+                    .padding(.horizontal, 8).padding(.vertical, 3)
                     .foregroundStyle(Theme.accent)
+                    .background(Theme.accent.opacity(0.14), in: Capsule())
+                    .contentShape(Capsule())
+                }
             }
             .buttonStyle(.plain)
-            .help(running ? "Pause timer" : "Start timer")
-            // The pause button stays visible while the timer runs, so it can always be stopped.
+            .help(running ? "This sitting, since the timer was started. Click to pause." : "Start timer")
+            // The running clock always shows, so it can always be stopped.
             .opacity(hovering || running ? 1 : 0)
         }
     }
@@ -1013,11 +1107,11 @@ struct TaskCard: View {
                     .help("Type in \(project?.kind.label ?? "the tracker")")
             }
             Spacer(minLength: 0)
-            // Only while a timer runs and there is earlier time: otherwise the bottom row's
-            // figure already is the total.
-            if showTotal, running, task.total(now: store.now) - task.currentStretch(now: store.now) >= 60 {
-                Label(Fmt.short(task.total(now: store.now)), systemImage: "sum")
-                    .labelStyle(.titleAndIcon)
+            // The task's whole time lives here, apart from the pills below. While a timer runs it
+            // shows only with earlier time: otherwise the clock below already is the total.
+            if showTotal, running ? task.total(now: store.now) - task.currentStretch(now: store.now) >= 60
+                                  : task.total(now: Date()) >= 60 {
+                Text(Fmt.short(task.total(now: running ? store.now : Date())))
                     .font(.caption).monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1082,26 +1176,14 @@ struct TaskCard: View {
             // The full row when it fits; in a narrow column the session badge shrinks to its icon.
             // A row wider than the card is not cut off but pushes the card out of its column.
             ViewThatFits(in: .horizontal) {
-                footer(project: project, running: running, compact: false)
-                footer(project: project, running: running, compact: true)
+                footer(project: project, running: running, level: 0)
+                footer(project: project, running: running, level: 1)
+                footer(project: project, running: running, level: 2)
+                footer(project: project, running: running, level: 3)
             }
         }
         .padding(10)
-        // The edit button floats over the corner while the pointer is on the card. A place of its
-        // own in the top row cost room that row does not have in a narrow column.
-        .overlay(alignment: .topTrailing) {
-            if hovering {
-                Button(action: onEdit) {
-                    Image(systemName: "gearshape")
-                        .font(.caption)
-                        .padding(5)
-                        .background(.regularMaterial, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help("Edit task")
-                .padding(5)
-            }
-        }
+        // No edit button on the card: it covered the assignee. Edit is in the right-click menu (and E).
         // Running timer: a faint red wash over the card.
         .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
             .fill(Theme.accent.opacity(running ? 0.13 : 0)))
@@ -1167,9 +1249,13 @@ struct TaskCard: View {
                 }
             }
             Divider()
+            Menu("Due date") { DueMenuItems(task: task) { pickingDue = true } }
             Button("Edit…", action: onEdit)
             Button("Archive") { store.archive(task: task.id) }
             Button("Delete…", role: .destructive) { confirmDelete = true }
+        }
+        .popover(isPresented: $pickingDue, arrowEdge: .trailing) {
+            DuePicker(taskId: task.id).environment(store)
         }
         .sheet(isPresented: $startingSession) {
             // The ticket as last loaded in the details, when there is a copy: the prompt is
