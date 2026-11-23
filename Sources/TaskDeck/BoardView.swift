@@ -890,6 +890,7 @@ struct TaskCard: View {
     @State private var hovering = false
     @State private var confirmDelete = false
     @State private var startingSession = false
+    @State private var creatingTicket = false
 
     private func footer(project: Project?, running: Bool, compact: Bool) -> some View {
         HStack(spacing: 8) {
@@ -1142,6 +1143,9 @@ struct TaskCard: View {
             if TicketFetcher.canFetch(project: project, task: task) {
                 Button("View ticket details…", action: onDetails)
             }
+            if task.ref.isEmpty, let project, project.kind != .other {
+                Button("Create in \(project.kind.label)…") { creatingTicket = true }
+            }
             if let link {
                 Button("Open ticket in browser") { Browser.open(link, space: project) }
                 Button("Copy link") {
@@ -1170,6 +1174,9 @@ struct TaskCard: View {
             Button("Edit…", action: onEdit)
             Button("Archive") { store.archive(task: task.id) }
             Button("Delete…", role: .destructive) { confirmDelete = true }
+        }
+        .sheet(isPresented: $creatingTicket) {
+            CreateTicketView(taskId: task.id).environment(store)
         }
         .sheet(isPresented: $startingSession) {
             // The ticket as last loaded in the details, when there is a copy: the prompt is
