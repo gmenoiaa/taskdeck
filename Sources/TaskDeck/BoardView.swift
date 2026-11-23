@@ -330,7 +330,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         @Bindable var store = store
         Group {
             if tab == "overview" {
-                OverviewView(spaceId: filter, onDetails: { details = $0 })
+                OverviewView(spaceId: filter, onDetails: { details = $0 }, onGoal: openGoal)
             } else if tab == "goals" {
                 GoalsView(spaceId: filter, selection: $goalSelected, onOpen: openCard, onNewTask: { newTask(goal: $0) },
                           onShowOnBoard: showGoalOnBoard)

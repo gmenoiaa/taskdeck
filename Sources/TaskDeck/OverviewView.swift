@@ -7,6 +7,8 @@ struct OverviewView: View {
     let spaceId: UUID?
     /// Opens a task's ticket view; the window owns that sheet.
     let onDetails: (TaskItem) -> Void
+    /// Opens a goal in the Goals tab.
+    var onGoal: (UUID) -> Void = { _ in }
 
     private var tasks: [TaskItem] { store.tasks.filter { spaceId == nil || $0.projectId == spaceId } }
 
@@ -35,6 +37,7 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 22) {
                 time(now: now, today: today, week: week)
                 if Orca.isInstalled { sessions }
+                goals(week: week, now: now)
                 if spaceId == nil { bySpace(week: week, now: now) }
                 topTasks(week: week, now: now)
                 board
@@ -140,6 +143,59 @@ struct OverviewView: View {
                 }
                 .padding(.horizontal, 10).padding(.vertical, 7)
                 .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    // MARK: Goals
+
+    /// Active goals with how far each is and the time it took this week. Paused and finished
+    /// goals stay in the Goals tab. A goal's figures cover all its tasks, in every space: a goal
+    /// is one piece of work wherever its tickets live.
+    @ViewBuilder
+    private func goals(week: DateInterval, now: Date) -> some View {
+        let rows = store.goals(in: spaceId).filter { $0.status == .active }.map { goal in
+            let tasks = store.tasks(of: goal.id)
+            return (goal: goal, done: tasks.filter(store.isDone).count, total: tasks.count,
+                    week: tasks.reduce(0) { $0 + $1.tracked(in: week, now: now) })
+        }
+        // What is due comes first, soonest at the top; then where the time went this week.
+        .sorted { a, b in
+            switch (a.goal.due, b.goal.due) {
+            case let (x?, y?): return x < y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return a.week > b.week
+            }
+        }
+        if !rows.isEmpty {
+            section("Goals") {
+                ForEach(rows, id: \.goal.id) { row in
+                    HStack(spacing: 12) {
+                        Button { onGoal(row.goal.id) } label: {
+                            Text(row.goal.displayName).lineLimit(1).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open the goal")
+                        if let due = row.goal.due {
+                            Text("Due " + Due.label(due)).font(.caption.weight(.medium)).foregroundStyle(Due.color(due))
+                        }
+                        Spacer(minLength: 12)
+                        if row.total > 0 {
+                            ProgressView(value: Double(row.done), total: Double(row.total))
+                                .tint(Theme.accent).frame(width: 90)
+                            Text("\(row.done)/\(row.total)").monospacedDigit().foregroundStyle(.secondary)
+                                .frame(minWidth: 34, alignment: .trailing)
+                        } else {
+                            Text("No tasks").foregroundStyle(.secondary)
+                        }
+                        Text(row.week >= 60 ? Fmt.short(row.week) : "—").monospacedDigit().foregroundStyle(.secondary)
+                            .frame(minWidth: 56, alignment: .trailing)
+                            .help("Time tracked on the goal's tasks this week")
+                    }
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                }
             }
         }
     }
