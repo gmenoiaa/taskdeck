@@ -367,6 +367,7 @@ struct PullRequestBadge: View {
 struct SessionsList: View {
     @Environment(AppStore.self) private var store
     let taskId: UUID
+    @State private var removing: [TaskWorktree] = []
 
     private static let started: DateFormatter = {
         let f = DateFormatter()
@@ -403,6 +404,15 @@ struct SessionsList: View {
                         Button("Open PR") { Browser.open(pr, space: store.project(store.task(taskId)?.projectId)) }
                     }
                     Button("Open in Orca") { Task { await Orca.reveal(session) } }
+                    if let id = session.worktreeId, store.removingWorktrees.contains(id) {
+                        ProgressView().controlSize(.small).help("Removing the worktree in Orca…")
+                    } else if let task = store.task(taskId), store.removableSessions(of: task).contains(session) {
+                        Button { removing = [TaskWorktree(taskId: taskId, session: session)] } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove the worktree in Orca: its checkout is deleted.")
+                    }
                     // A worktree matched by its name would only be found again on the next refresh.
                     if !session.agent.isEmpty {
                         Button { store.removeSession(session.id, from: taskId) } label: {
@@ -416,6 +426,7 @@ struct SessionsList: View {
                 .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
             }
         }
+        .removingWorktrees($removing)
     }
 
     private func agentLabel(_ id: String) -> String {
