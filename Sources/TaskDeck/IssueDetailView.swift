@@ -35,6 +35,7 @@ struct IssueDetailView: View {
     @State private var changing = false
     @State private var changeError: String?
     @State private var showEstimates = false
+    @State private var pickingDue = false
     @State private var estimateText = ""
     @State private var devEstimateText = ""
     @State private var savingEstimates = false
@@ -500,7 +501,8 @@ struct IssueDetailView: View {
     /// Where the ticket stands, in one box under the title: status and assignee first, since those
     /// two can be changed, then what the tracker says about it.
     private func facts(_ detail: TicketDetail) -> some View {
-        let plain = detail.meta.filter { $0.0 != "Assignee" || options == nil }
+        // "Due" has a row of its own below, where it can be set.
+        let plain = detail.meta.filter { ($0.0 != "Assignee" || options == nil) && $0.0 != "Due" }
         // A long value (a parent ticket's title) gets a line of its own instead of a narrow column.
         let short = plain.filter { $0.1.count <= 30 }
         let long = plain.filter { $0.1.count > 30 }
@@ -531,6 +533,7 @@ struct IssueDetailView: View {
                         fact("Dev est.") { estimatePill(dev.hours, detail) }
                     }
                 }
+                if let task { fact("Due") { dueMenu(task) } }
                 if let task, sessionCount > 0 { fact("Session") { sessionPills(task) } }
                 ForEach(short, id: \.0) { item in
                     fact(item.0) { factValue(item, in: detail) }
@@ -718,6 +721,22 @@ struct IssueDetailView: View {
         }
         changing = false
         await load(keepingChangeError: true)
+    }
+
+    private func dueMenu(_ task: TaskItem) -> some View {
+        Menu {
+            DueMenuItems(task: task) { pickingDue = true }
+        } label: {
+            if let due = task.due {
+                pill(Due.label(due) + (task.dueDate == nil ? " · ticket" : ""), editable: true, icon: "calendar")
+                    .foregroundStyle(Due.color(due) == .secondary ? Color.primary : Due.color(due))
+            } else {
+                pill("None", editable: true).foregroundStyle(.secondary)
+            }
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help(task.due == nil ? "Set a due date. It is kept in TaskDeck only." : Due.help(task))
+        .popover(isPresented: $pickingDue, arrowEdge: .bottom) { DuePicker(taskId: taskId).environment(store) }
     }
 
     /// A pill like Status and Assignee: the value, or "Not set" in orange, and a click to edit.

@@ -776,6 +776,13 @@ final class AppStore {
 
     // MARK: Tracker status
 
+    /// Sets the task's own due date; nil goes back to the tracker's, if it has one.
+    func setDue(_ id: UUID, _ date: Date?) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].dueDate = date.map { Calendar.current.startOfDay(for: $0) }
+        save()
+    }
+
     /// Records what the tracker says about a ticket: its status and who it is assigned to.
     func setRemote(_ id: UUID, from detail: TicketDetail) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
@@ -790,6 +797,10 @@ final class AppStore {
         }
         if detail.tracksEstimate, tasks[i].estimateGap != detail.estimateGap {
             tasks[i].estimateGap = detail.estimateGap
+            changed = true
+        }
+        if tasks[i].remoteDue != Due.day(detail.dueDay) {
+            tasks[i].remoteDue = Due.day(detail.dueDay)
             changed = true
         }
         // A successful fetch with no assignee means the ticket is unassigned now.

@@ -21,6 +21,8 @@ struct TicketDetail {
     /// Oldest to newest.
     var comments: [Comment] = []
     var estimatedHours: Double?
+    /// The tracker's due day ("2026-11-27"), when it has one.
+    var dueDay: String?
 
     /// Who the ticket is assigned to (several people on GitHub), or nil when unassigned.
     var assignee: String? { meta.first { $0.0 == "Assignee" }?.1 }
@@ -190,6 +192,7 @@ enum TicketFetcher {
             ("Done", issue.done_ratio.map { "\($0)%" }),
             ("Parent", issue.parent.map { "#\($0.id)" }),
         ])
+        d.dueDay = issue.due_date
         if let parent = issue.parent { d.links["Parent"] = URL(string: "\(base)/issues/\(parent.id)") }
         d.comments = (issue.journals ?? []).map {
             .init(id: "\($0.id)", author: $0.user?.name ?? "—",
@@ -260,6 +263,7 @@ enum TicketFetcher {
                              status: name("status"))
         d.description = richText(f["description"])
         d.markdown = rich
+        d.dueDay = f["duedate"] as? String
         d.meta = compact([
             ("Project", name("project")),
             ("Priority", name("priority")),

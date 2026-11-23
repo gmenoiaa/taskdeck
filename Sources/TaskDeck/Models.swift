@@ -160,6 +160,11 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var estimateGap: String?
     /// Who the ticket is assigned to in its tracker, when known.
     var remoteAssignee: String?
+    /// The due date set here. It is kept in TaskDeck only and wins over the tracker's.
+    var dueDate: Date?
+    /// The ticket's own due date in its tracker, as last seen.
+    var remoteDue: Date?
+    var due: Date? { dueDate ?? remoteDue }
     /// Last plain-language explanation of the ticket written by Claude (Markdown).
     var explanation: String?
     /// Agent sessions started in Orca for this task, oldest first. Optional so older files still load.
