@@ -7,6 +7,7 @@ import Observation
 final class AppStore {
     var projects: [Project] = []
     var tasks: [TaskItem] = []
+    var goals: [Goal] = []
     var columns: [BoardColumn] = BoardColumn.defaults
     var singleTimer = false
     /// Claude model used by AI features, and instructions added to every AI request.
@@ -93,6 +94,7 @@ final class AppStore {
         var announcedPullRequests: [String]?
         var ignoredAssigned: [String]?
         var unloggedRemindedAt: Date?
+        var goals: [Goal]?
     }
 
     static var dataURL: URL {
@@ -304,6 +306,7 @@ final class AppStore {
             announcedPullRequests = Set(snap.announcedPullRequests ?? [])
             ignoredAssigned = Set(snap.ignoredAssigned ?? [])
             unloggedRemindedAt = snap.unloggedRemindedAt
+            goals = snap.goals ?? []
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -326,7 +329,8 @@ final class AppStore {
                             knownAssigned: knownAssigned.map { $0.sorted() },
                             clearedWaiting: clearedWaiting.isEmpty ? nil : clearedWaiting.sorted(),
                             announcedPullRequests: announcedPullRequests.isEmpty ? nil : announcedPullRequests.sorted(),
-                            ignoredAssigned: ignoredAssigned.isEmpty ? nil : ignoredAssigned.sorted(), unloggedRemindedAt: unloggedRemindedAt)
+                            ignoredAssigned: ignoredAssigned.isEmpty ? nil : ignoredAssigned.sorted(), unloggedRemindedAt: unloggedRemindedAt,
+                            goals: goals.isEmpty ? nil : goals)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
@@ -451,6 +455,61 @@ final class AppStore {
         for i in tasks.indices where tasks[i].status == columnId {
             tasks[i].archived = true
         }
+        save()
+    }
+
+    // MARK: Goals
+
+    func goal(_ id: UUID?) -> Goal? {
+        guard let id else { return nil }
+        return goals.first { $0.id == id }
+    }
+
+    /// A goal's tasks, archived ones included: they are part of what was done for it.
+    func tasks(of goalId: UUID) -> [TaskItem] {
+        tasks.filter { $0.goalId == goalId }.sorted { $0.order < $1.order }
+    }
+
+    func isDone(_ task: TaskItem) -> Bool { task.archived || role(of: task.status) == .done }
+
+    /// Goals to show for a space: those with a task in it, and those with no task yet, which
+    /// would otherwise be nowhere to be found. Active first, finished last.
+    func goals(in space: UUID?) -> [Goal] {
+        let rank: [GoalStatus: Int] = [.active: 0, .paused: 1, .done: 2]
+        return goals.filter { goal in
+            guard let space else { return true }
+            let mine = tasks.filter { $0.goalId == goal.id }
+            return mine.isEmpty || mine.contains { $0.projectId == space }
+        }
+        .sorted { (rank[$0.status] ?? 0, $0.createdAt) < (rank[$1.status] ?? 0, $1.createdAt) }
+    }
+
+    func addGoal() -> Goal {
+        let goal = Goal()
+        goals.append(goal)
+        save()
+        return goal
+    }
+
+    func updateGoal(_ id: UUID, _ change: (inout Goal) -> Void) {
+        guard let i = goals.firstIndex(where: { $0.id == id }) else { return }
+        var goal = goals[i]
+        change(&goal)
+        guard goal != goals[i] else { return }
+        goals[i] = goal
+        save()
+    }
+
+    /// Deletes the goal with its notes and links. Its tasks stay on the board, without a goal.
+    func delete(goal id: UUID) {
+        goals.removeAll { $0.id == id }
+        for i in tasks.indices where tasks[i].goalId == id { tasks[i].goalId = nil }
+        save()
+    }
+
+    func setGoal(_ taskId: UUID, _ goalId: UUID?) {
+        guard let i = tasks.firstIndex(where: { $0.id == taskId }), tasks[i].goalId != goalId else { return }
+        tasks[i].goalId = goalId
         save()
     }
 

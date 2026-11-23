@@ -14,8 +14,10 @@ struct BoardView: View {
     @State private var showToday = false
     @State private var showPending = false
     @State private var showWaiting = false
-    /// The window's tab: "overview" (the first page) or "board". Remembered between launches.
+    /// The window's tab: "overview" (the first page), "board" or "goals". Remembered between launches.
     @AppStorage("mainTab") private var tab = "overview"
+    /// The goal open in the Goals tab, by id.
+    @AppStorage("goalSelected") private var goalSelected = ""
     @State private var search = ""
     /// Not kept between launches: a board that opens with cards missing looks broken.
     @State private var filters: Set<BoardFilter> = []
@@ -196,7 +198,13 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
     }
 
     private func newTask() {
-        editing = TaskItem(projectId: filter ?? store.projects.first?.id, status: store.defaultColumnId)
+        newTask(goal: tab == "goals" ? UUID(uuidString: goalSelected).flatMap { store.goal($0)?.id } : nil)
+    }
+
+    private func newTask(goal: UUID?) {
+        var task = TaskItem(projectId: filter ?? store.projects.first?.id, status: store.defaultColumnId)
+        task.goalId = goal
+        editing = task
     }
 
     /// Tracked time that is not on Redmine yet, in minutes worth showing.
@@ -288,6 +296,8 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         Group {
             if tab == "overview" {
                 OverviewView(spaceId: filter, onDetails: { details = $0 })
+            } else if tab == "goals" {
+                GoalsView(spaceId: filter, selection: $goalSelected, onOpen: openCard, onNewTask: { newTask(goal: $0) })
             } else {
                 GeometryReader { geo in
                     // Columns share the window width; with many columns they keep a readable width and scroll sideways.
@@ -359,9 +369,9 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         .onChange(of: filter) { _, new in savedSpace = new?.uuidString ?? "" }
         // The window keeps its name for Mission Control and the Window menu; the toolbar has no room for it.
         .modifier(NoToolbarTitle())
-        // The results are cards, so typing a search from the overview moves to the board.
+        // The results are cards, so typing a search from another tab moves to the board.
         .onChange(of: search) { _, new in
-            if !new.trimmingCharacters(in: .whitespaces).isEmpty, tab == "overview" { tab = "board" }
+            if !new.trimmingCharacters(in: .whitespaces).isEmpty, tab != "board" { tab = "board" }
         }
         .onChange(of: filters) { _, new in
             if !new.isEmpty, tab == "overview" { tab = "board" }
@@ -380,10 +390,11 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
                 Picker("View", selection: $tab) {
                     Text("Overview").tag("overview")
                     Text("Board").tag("board")
+                    Text("Goals").tag("goals")
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .help("Overview (⌘1) or board (⌘2) of \(store.project(filter)?.name ?? "all spaces")")
+                .help("Overview (⌘1), board (⌘2) or goals (⌘3) of \(store.project(filter)?.name ?? "all spaces")")
             }
             ToolbarItem(placement: .navigation) {
                 // With "All spaces", a click shows today's time per space.
@@ -691,7 +702,7 @@ struct BoardActions {
     var logPending: (() -> Void)?
     var showArchive: () -> Void
     var search: () -> Void
-    /// "overview" or "board".
+    /// "overview", "board" or "goals".
     var show: (String) -> Void
     /// The space shown, nil for all spaces.
     var space: UUID?
@@ -743,6 +754,9 @@ struct AppCommands: Commands {
                 .disabled(board == nil)
             Button("Board") { board?.show("board") }
                 .keyboardShortcut("2", modifiers: .command)
+                .disabled(board == nil)
+            Button("Goals") { board?.show("goals") }
+                .keyboardShortcut("3", modifiers: .command)
                 .disabled(board == nil)
             Divider()
             Button("Search Tasks") { board?.search() }

@@ -7,6 +7,7 @@ A native macOS app (SwiftUI) to manage the tasks I work on across several tracke
 - Redmine, Jira and GitHub: ticket details, comments, status and assignee, "Assigned to me" import
 - Redmine: log tracked time to the issue
 - Private notes per task
+- Goals: group tasks from any space with the notes, links and files that go with them
 - "Explain" a ticket in simple words with the Claude API
 
 ## Build
