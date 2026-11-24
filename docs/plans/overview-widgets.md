@@ -78,6 +78,18 @@ unchanged. They follow the selected period once phase 2 adds it.
 
 ## Phase 2 — Period navigation and charts
 
+**Done**, with these differences from what follows:
+
+- The period steps with ⌘[ and ⌘], not the plain arrow keys, which text fields need.
+- The widgets are still functions in `OverviewView.swift`; only the chart is its own view
+  (`OverviewChart.swift`). The period and the aggregation are in `OverviewPeriod.swift`.
+- No legend under the chart: the "By space" widget stays and carries the same figures.
+- A period that is over is still recomputed every second with the rest of the overview. The
+  single pass over the entries makes that cheap; rounding `now` to the minute is left for when
+  it shows up as a cost.
+- The tiles are Today (while the current week or month is shown), the period's total, the
+  average per worked day, and the unlogged time.
+
 `OverviewPeriod` (new, in `Overview/`)
 
 - `enum Scale { day, week, month }` and an anchor `Date`; gives the `DateInterval`, a label

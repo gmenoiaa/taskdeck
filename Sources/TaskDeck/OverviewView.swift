@@ -37,8 +37,16 @@ struct OverviewView: View {
     private struct Moment {
         let now: Date
         let today: DateInterval
-        let week: DateInterval
+        /// The period the time widgets cover, and its time day by day.
+        let period: OverviewPeriod
+        let days: [OverviewDay]
+        var span: DateInterval { period.interval }
     }
+
+    @State private var scale: OverviewPeriod.Scale = .week
+    /// A date in the period shown; nil follows the clock, so the overview left open overnight
+    /// moves on to the new day by itself. Not saved: it opens on now every time.
+    @State private var anchor: Date?
 
     /// Widgets that can show something here: agent sessions need Orca.
     private var placements: [OverviewPlacement] {
@@ -49,7 +57,9 @@ struct OverviewView: View {
         let now = store.now
         let calendar = Calendar.current
         let today = DateInterval(start: calendar.startOfDay(for: now), duration: 86_400)
-        let moment = Moment(now: now, today: today, week: calendar.dateInterval(of: .weekOfYear, for: now) ?? today)
+        let period = OverviewPeriod(scale: scale, anchor: anchor ?? now)
+        let moment = Moment(now: now, today: today, period: period,
+                            days: store.trackedByDay(in: period, project: spaceId, now: now))
         let placements = placements
         let shown = placements.filter { !$0.hidden }.map(\.widget)
         ScrollView {
@@ -62,9 +72,9 @@ struct OverviewView: View {
                         Text("Hidden").font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 6)
                         ForEach(hidden) { widget in hiddenRow(widget) }
                     }
-                } else if shown.isEmpty {
-                    Text("Every widget is hidden.").foregroundStyle(.secondary)
                 } else {
+                    periodBar(moment)
+                    if shown.isEmpty { Text("Every widget is hidden.").foregroundStyle(.secondary) }
                     ForEach(shown) { widget in
                         content(widget, moment).contextMenu { menu(widget, shown: shown) }
                     }
@@ -73,15 +83,6 @@ struct OverviewView: View {
             .padding(20)
             // Wider than this, the figures drift apart and rows become hard to follow across.
             .frame(maxWidth: 860, alignment: .leading)
-            // The first row of a widget is its title, at the left: the button sits in the free
-            // space beside it instead of taking a row of its own.
-            .overlay(alignment: .topTrailing) {
-                if !customising {
-                    quiet(Button("Customise") { withAnimation { customising = true } })
-                        .help("Reorder, hide and show the overview's widgets")
-                        .padding(.top, 16).padding(.trailing, 20)
-                }
-            }
             .frame(maxWidth: .infinity)
         }
         .softScrollEdges()
@@ -92,19 +93,55 @@ struct OverviewView: View {
     private func content(_ widget: OverviewWidget, _ moment: Moment) -> some View {
         switch widget {
         case .standup: standup(now: moment.now)
-        case .time: time(now: moment.now, today: moment.today, week: moment.week)
-        case .chart: chart(now: moment.now, today: moment.today, week: moment.week)
+        case .time: time(moment)
+        case .chart: chart(moment)
         case .sessions: sessions
-        case .goals: goals(week: moment.week, now: moment.now)
+        case .goals: goals(span: moment.span, now: moment.now)
         case .bySpace:
             if spaceId == nil {
-                bySpace(week: moment.week, now: moment.now)
+                bySpace(moment)
             } else if customising {
                 Text("Shown with All spaces.").foregroundStyle(.secondary)
             }
-        case .topTasks: topTasks(week: moment.week, now: moment.now)
+        case .topTasks: topTasks(moment)
         case .board: board
         }
+    }
+
+    // MARK: Period
+
+    /// Moves the time widgets back and forward, and switches between a day, a week and a month.
+    private func periodBar(_ moment: Moment) -> some View {
+        let period = moment.period
+        return HStack(spacing: 8) {
+            quiet(Button { show(period.stepped(-1)) } label: { Image(systemName: "chevron.left") })
+                .keyboardShortcut("[", modifiers: .command)
+                .help("Previous \(scale.rawValue) (⌘[)")
+                .accessibilityLabel("Previous \(scale.rawValue)")
+            quiet(Button { show(period.stepped(1)) } label: { Image(systemName: "chevron.right") })
+                .keyboardShortcut("]", modifiers: .command)
+                .help("Next \(scale.rawValue) (⌘])")
+                .accessibilityLabel("Next \(scale.rawValue)")
+            Text(period.title(now: moment.now)).font(.headline)
+            if period.phrase(now: moment.now) != nil {
+                Text(period.dates).foregroundStyle(.secondary)
+            }
+            if !period.contains(moment.now) {
+                quiet(Button("Today") { withAnimation { anchor = nil } })
+                    .help("Back to the \(scale == .day ? "current day" : "current \(scale.rawValue)")")
+            }
+            Spacer(minLength: 12)
+            Picker("Period", selection: $scale) {
+                ForEach(OverviewPeriod.Scale.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden().fixedSize()
+            quiet(Button("Customise") { withAnimation { customising = true } })
+                .help("Reorder, hide and show the overview's widgets")
+        }
+    }
+
+    private func show(_ date: Date) {
+        withAnimation { anchor = OverviewPeriod(scale: scale, anchor: date).contains(store.now) ? nil : date }
     }
 
     // MARK: Customising
@@ -253,52 +290,92 @@ struct OverviewView: View {
 
     // MARK: Time
 
-    private func time(now: Date, today: DateInterval, week: DateInterval) -> some View {
-        let unlogged = tasks.reduce(0) { $0 + $1.unloggedSeconds }
+    private func time(_ moment: Moment) -> some View {
+        let now = moment.now, period = moment.period
+        // Only what can be sent, as the time-to-push button counts it: stopped time on a Jira or
+        // GitHub task can never be logged from here and would keep the figure up for good.
+        let unlogged = store.pendingLogTasks.filter { spaceId == nil || $0.projectId == spaceId }
+            .reduce(0) { $0 + $1.unloggedSeconds }
+        let total = moment.days.reduce(0) { $0 + $1.total }
+        let daily = store.dailyTarget(project: spaceId)
+        let current = period.contains(now)
+        // The target counts Monday to Friday: at the weekend there is nothing left to do.
+        let todayTarget = Calendar.current.isDateInWeekend(now) ? 0 : daily
+        let worked = moment.days.filter { $0.total >= 60 }.count
         return section(.time) {
-            HStack(spacing: 10) {
-                tile(Fmt.short(store.tracked(in: today, now: now, project: spaceId)), "Today")
-                tile(Fmt.short(store.tracked(in: week, now: now, project: spaceId)), "This week")
+            HStack(alignment: .top, spacing: 10) {
+                if current && period.scale != .day {
+                    let today = store.tracked(in: moment.today, now: now, project: spaceId)
+                    tile(Fmt.short(today), "Today", notes: [left(today, of: todayTarget)])
+                }
+                tile(Fmt.short(total), period.title(now: now), notes: periodNotes(moment, total: total, daily: daily))
+                if period.scale != .day {
+                    tile(worked > 0 ? Fmt.short(total / Double(worked)) : "—", "Average per worked day")
+                }
                 // Orange is the app's "needs you" colour, as on the time-to-push button.
-                tile(Fmt.short(unlogged), "Stopped, not logged yet", color: unlogged >= 60 ? .orange : .primary)
+                tile(Fmt.short(unlogged), "Stopped, not on Redmine yet", color: unlogged >= 60 ? .orange : .primary)
             }
+            // The tiles take the height of the tallest, so one with a note does not stand out.
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func chart(now: Date, today: DateInterval, week: DateInterval) -> some View {
-        let days = (0..<7).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: week.start) }
-            .map { start -> (start: Date, seconds: TimeInterval) in
-                (start, store.tracked(in: DateInterval(start: start, duration: 86_400), now: now, project: spaceId))
+    /// "2h 10m left of 8h 00m", or that the target is reached; nil with no target.
+    private func left(_ tracked: TimeInterval, of target: TimeInterval) -> String? {
+        guard target > 0 else { return nil }
+        let rest = target - tracked
+        return rest >= 60 ? "\(Fmt.short(rest)) left of \(Fmt.short(target))" : "Target of \(Fmt.short(target)) reached"
+    }
+
+    /// What goes under the period's total: how it stands against the target, and against the
+    /// period before.
+    private func periodNotes(_ moment: Moment, total: TimeInterval, daily: TimeInterval) -> [String?] {
+        let now = moment.now, period = moment.period
+        let current = period.contains(now)
+        let target = daily * Double(period.workdays)
+        var notes: [String?] = []
+        if period.scale == .day && current {
+            notes.append(left(total, of: target))
+        } else if target > 0 {
+            notes.append("of \(Fmt.short(target))")
+        }
+        if period.scale != .day {
+            let before = OverviewPeriod(scale: period.scale, anchor: period.stepped(-1)).interval
+            // A week in progress is compared with the same part of the one before, not with all of it.
+            let elapsed = current ? now.timeIntervalSince(period.interval.start) : before.duration
+            let compared = DateInterval(start: before.start, duration: min(before.duration, max(0, elapsed)))
+            let earlier = store.tracked(in: compared, now: now, project: spaceId)
+            if earlier >= 60 {
+                let difference = total - earlier
+                let unit = period.scale.rawValue
+                notes.append("\(difference >= 0 ? "+" : "−")\(Fmt.short(abs(difference))) "
+                             + (current ? "on last \(unit) at this point" : "on the \(unit) before"))
             }
-        let most = max(days.map(\.seconds).max() ?? 0, 1)
-        return section(.chart) {
-            HStack(alignment: .bottom, spacing: 8) {
-                ForEach(days, id: \.start) { day in
-                    // Not `today.contains`: a DateInterval includes its end, which is tomorrow's start.
-                    let isToday = day.start == today.start
-                    VStack(spacing: 4) {
-                        Text(day.seconds >= 60 ? Fmt.short(day.seconds) : " ")
-                            .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(isToday ? Theme.accent : Color.primary.opacity(0.25))
-                            // A day with no time keeps a thin line, so the week still reads as seven days.
-                            .frame(height: max(2, 56 * day.seconds / most))
-                        Text(day.start.formatted(.dateTime.weekday(.abbreviated)))
-                            .font(.caption).foregroundStyle(isToday ? .primary : .secondary)
-                    }
-                    .frame(maxWidth: .infinity)
+        }
+        return notes
+    }
+
+    private func chart(_ moment: Moment) -> some View {
+        section(.chart, title: moment.period.scale == .day ? "Timeline" : "Hours per day") {
+            OverviewChart(period: moment.period, days: moment.days, spaceId: spaceId, now: moment.now,
+                          dailyTarget: store.dailyTarget(project: spaceId)) { day in
+                withAnimation {
+                    scale = .day
+                    anchor = Calendar.current.isDate(day, inSameDayAs: store.now) ? nil : day
                 }
             }
-            .frame(height: 100, alignment: .bottom)
         }
     }
 
-    private func tile(_ value: String, _ label: String, color: Color = .primary) -> some View {
+    private func tile(_ value: String, _ label: String, color: Color = .primary, notes: [String?] = []) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value).font(.title2.weight(.semibold)).monospacedDigit().foregroundStyle(color)
             Text(label).font(.caption).foregroundStyle(.secondary)
+            ForEach(notes.compactMap { $0 }, id: \.self) { note in
+                Text(note).font(.caption).monospacedDigit().foregroundStyle(.tertiary)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(12)
         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: Radius.card))
     }
@@ -354,23 +431,23 @@ struct OverviewView: View {
 
     // MARK: Goals
 
-    /// Active goals with how far each is and the time it took this week. Paused and finished
+    /// Active goals with how far each is and the time it took in the period shown. Paused and finished
     /// goals stay in the Goals tab. A goal's figures cover all its tasks, in every space: a goal
     /// is one piece of work wherever its tickets live.
     @ViewBuilder
-    private func goals(week: DateInterval, now: Date) -> some View {
+    private func goals(span: DateInterval, now: Date) -> some View {
         let rows = store.goals(in: spaceId).filter { $0.status == .active }.map { goal in
             let tasks = store.tasks(of: goal.id)
             return (goal: goal, done: tasks.filter(store.isDone).count, total: tasks.count,
-                    week: tasks.reduce(0) { $0 + $1.tracked(in: week, now: now) })
+                    spent: tasks.reduce(0) { $0 + $1.tracked(in: span, now: now) })
         }
-        // What is due comes first, soonest at the top; then where the time went this week.
+        // What is due comes first, soonest at the top; then where the time went.
         .sorted { a, b in
             switch (a.goal.due, b.goal.due) {
             case let (x?, y?): return x < y
             case (_?, nil): return true
             case (nil, _?): return false
-            case (nil, nil): return a.week > b.week
+            case (nil, nil): return a.spent > b.spent
             }
         }
         if !rows.isEmpty {
@@ -394,9 +471,9 @@ struct OverviewView: View {
                         } else {
                             Text("No tasks").foregroundStyle(.secondary)
                         }
-                        Text(row.week >= 60 ? Fmt.short(row.week) : "—").monospacedDigit().foregroundStyle(.secondary)
+                        Text(row.spent >= 60 ? Fmt.short(row.spent) : "—").monospacedDigit().foregroundStyle(.secondary)
                             .frame(minWidth: 56, alignment: .trailing)
-                            .help("Time tracked on the goal's tasks this week")
+                            .help("Time tracked on the goal's tasks in the period shown")
                     }
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
@@ -408,13 +485,13 @@ struct OverviewView: View {
     // MARK: Lists
 
     @ViewBuilder
-    private func bySpace(week: DateInterval, now: Date) -> some View {
+    private func bySpace(_ moment: Moment) -> some View {
         let rows = store.projects
-            .map { (space: $0, seconds: store.tracked(in: week, now: now, project: $0.id)) }
+            .map { space in (space: space, seconds: moment.days.reduce(0) { $0 + ($1.bySpace[space.id] ?? 0) }) }
             .filter { $0.seconds >= 60 }
             .sorted { $0.seconds > $1.seconds }
         if !rows.isEmpty {
-            section(.bySpace) {
+            section(.bySpace, title: moment.period.phrase(now: moment.now).map { "\($0.prefix(1).uppercased() + $0.dropFirst()) by space" }) {
                 ForEach(rows, id: \.space.id) { row in
                     line(dot: row.space.color, row.space.name, Fmt.short(row.seconds))
                 }
@@ -423,13 +500,13 @@ struct OverviewView: View {
     }
 
     @ViewBuilder
-    private func topTasks(week: DateInterval, now: Date) -> some View {
-        let rows = tasks.map { (task: $0, seconds: $0.tracked(in: week, now: now)) }
+    private func topTasks(_ moment: Moment) -> some View {
+        let rows = tasks.map { (task: $0, seconds: $0.tracked(in: moment.span, now: moment.now)) }
             .filter { $0.seconds >= 60 }
             .sorted { $0.seconds > $1.seconds }
             .prefix(6)
         if !rows.isEmpty {
-            section(.topTasks) {
+            section(.topTasks, title: moment.period.phrase(now: moment.now).map { "Most time \($0)" }) {
                 ForEach(Array(rows), id: \.task.id) { row in
                     HStack(spacing: 8) {
                         Circle().fill(store.project(row.task.projectId)?.color ?? .gray).frame(width: 8, height: 8)
@@ -462,9 +539,11 @@ struct OverviewView: View {
     // MARK: Pieces
 
     /// A widget's title over its content. While customising the card's strip carries the title.
-    private func section<Content: View>(_ widget: OverviewWidget, @ViewBuilder content: () -> Content) -> some View {
+    /// The time widgets pass a title that names the period.
+    private func section<Content: View>(_ widget: OverviewWidget, title: String? = nil,
+                                        @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !customising { Text(widget.title).font(.headline) }
+            if !customising { Text(title ?? widget.title).font(.headline) }
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)

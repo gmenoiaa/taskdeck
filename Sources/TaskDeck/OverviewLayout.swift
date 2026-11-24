@@ -6,15 +6,16 @@ enum OverviewWidget: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// The widget's name. On the overview the time widgets are titled by the period shown instead.
     var title: String {
         switch self {
         case .standup: "Daily standup"
         case .time: "Time"
-        case .chart: "This week"
+        case .chart: "Chart"
         case .sessions: "Agent sessions"
         case .goals: "Goals"
-        case .bySpace: "This week by space"
-        case .topTasks: "Most time this week"
+        case .bySpace: "By space"
+        case .topTasks: "Most time"
         case .board: "On the board"
         }
     }
