@@ -119,6 +119,8 @@ struct Project: Identifiable, Codable, Hashable {
     var createType: String?
     /// The space's daily standup; nil for a space that has none set up.
     var standup: StandupSettings?
+    /// How much of this space the review may send to Claude: a `ReviewDetail`. Nil is status only.
+    var reviewDetail: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }

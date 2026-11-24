@@ -37,6 +37,7 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 22) {
                 standup(now: now)
                 time(now: now, today: today, week: week)
+                ReviewSection(spaceId: spaceId, onDetails: onDetails)
                 if Orca.isInstalled { sessions }
                 goals(week: week, now: now)
                 if spaceId == nil { bySpace(week: week, now: now) }
