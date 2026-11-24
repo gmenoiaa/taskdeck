@@ -154,6 +154,7 @@ extension AppStore {
         guard sessionStatuses != nil else { return }
         var seen: [String: Orca.Status.Kind] = [:]
         var ended: Set<String> = []
+        var stopped = false
         for task in tasks where !task.archived {
             for session in sessions(of: task) {
                 guard let id = session.worktreeId, let status = status(of: session) else { continue }
@@ -172,7 +173,9 @@ extension AppStore {
                                       body: label(task))
                     }
                 case .yourTurn, .prOpen, .idle:
-                    guard before == .working, notify.sessions else { break }
+                    guard before == .working else { break }
+                    stopped = true
+                    guard notify.sessions else { break }
                     let title = status.kind == .prOpen ? "Pull request opened"
                         : status.kind == .yourTurn ? "Your turn" : "Agent stopped"
                     let tail = status.lastMessage.map { "\n\(String($0.suffix(160)))" } ?? ""
@@ -183,6 +186,7 @@ extension AppStore {
             }
         }
         sessionKinds = seen
+        if stopped { reviewAfterSessionStopped() }
         // Everything ended and seen counts as said, also what was found ended at the first look.
         // Ends of sessions that no longer exist are dropped so the list does not grow for ever.
         let known = announcedPullRequests.filter { seen[String($0.split(separator: "|").first ?? "")] != nil }

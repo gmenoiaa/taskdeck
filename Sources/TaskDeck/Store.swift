@@ -43,6 +43,20 @@ final class AppStore {
     var ignoredAssigned: Set<String> = []
     /// When the end-of-day reminder about unlogged time was last sent.
     @ObservationIgnored var unloggedRemindedAt: Date?
+    /// What the last review found, over every space.
+    var review: Review?
+    /// The Claude home whose login runs the review, as typed; empty for the default one.
+    var reviewHome = ""
+    var reviewModel = ClaudeCode.defaultModel
+    /// Whether a session that stops starts a review by itself.
+    var reviewWhenSessionStops = false
+    var reviewing = false
+    /// Review lines the user dismissed, by task id, with what each was about (`ReviewItem.key`).
+    var reviewDismissed: [String: String] = [:]
+    /// When a review last started, so automatic ones keep their distance.
+    @ObservationIgnored var reviewRanAt: Date?
+    /// Exactly what the last request to Claude held, to be read in the app. Not saved.
+    var lastReviewPrompt: String?
     /// The last standup update written for each space, by space id.
     var standups: [UUID: StandupNote] = [:]
     /// When each space's standup reminder was last sent, so it comes once a day.
@@ -112,6 +126,11 @@ final class AppStore {
         /// Keyed by the space's UUID string: dictionaries with UUID keys encode as arrays.
         var standups: [String: StandupNote]?
         var standupRemindedAt: [String: Date]?
+        var review: Review?
+        var reviewHome: String?
+        var reviewModel: String?
+        var reviewWhenSessionStops: Bool?
+        var reviewDismissed: [String: String]?
     }
 
     static var dataURL: URL {
@@ -330,6 +349,11 @@ final class AppStore {
             goals = snap.goals ?? []
             standups = Self.byUUID(snap.standups)
             standupRemindedAt = Self.byUUID(snap.standupRemindedAt)
+            review = snap.review
+            reviewHome = snap.reviewHome ?? ""
+            reviewModel = snap.reviewModel ?? ClaudeCode.defaultModel
+            reviewWhenSessionStops = snap.reviewWhenSessionStops ?? false
+            reviewDismissed = snap.reviewDismissed ?? [:]
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -355,7 +379,10 @@ final class AppStore {
                             ignoredAssigned: ignoredAssigned.isEmpty ? nil : ignoredAssigned.sorted(), unloggedRemindedAt: unloggedRemindedAt,
                             goals: goals.isEmpty ? nil : goals,
                             standups: standups.isEmpty ? nil : Self.byString(standups),
-                            standupRemindedAt: standupRemindedAt.isEmpty ? nil : Self.byString(standupRemindedAt))
+                            standupRemindedAt: standupRemindedAt.isEmpty ? nil : Self.byString(standupRemindedAt),
+                            review: review, reviewHome: reviewHome.isEmpty ? nil : reviewHome,
+                            reviewModel: reviewModel, reviewWhenSessionStops: reviewWhenSessionStops,
+                            reviewDismissed: reviewDismissed.isEmpty ? nil : reviewDismissed)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }

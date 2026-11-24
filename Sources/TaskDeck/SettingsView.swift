@@ -295,10 +295,32 @@ private struct AgentSettings: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            Section("Review") {
+                if !ClaudeCode.isInstalled {
+                    Text("The review asks Claude through Claude Code, which was not found on this Mac. Without it the review lists only what the app's own rules find.")
+                        .foregroundStyle(.secondary)
+                }
+                TextField("Claude home", text: $store.reviewHome, prompt: Text("~/.claude (default)"))
+                if !store.reviewHome.trimmingCharacters(in: .whitespaces).isEmpty,
+                   Orca.resolvedHome(store.reviewHome) == nil {
+                    Text("That is not a directory on this Mac.").font(.caption).foregroundStyle(.orange)
+                }
+                Picker("Model", selection: $store.reviewModel) {
+                    ForEach(ClaudeCode.models, id: \.id) { Text($0.label).tag($0.id) }
+                }
+                Toggle("Review when a session stops", isOn: $store.reviewWhenSessionStops)
+                Text("The review in the overview goes over every open task and its agent sessions and lists what needs you. It runs when you ask for it; with the switch on, also when an agent stops, at most every ten minutes. It changes nothing in Orca, the trackers or GitHub.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("It uses the login of this one Claude home for every space, not the API key: the requests count against that login's usage limits, the same ones its sessions use. Each space sets how much of it is sent (Edit space, Review); a new space sends its status only. Lines that look like keys or passwords are left out of agent and terminal text, which lowers the risk of sending a secret but does not remove it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
         .frame(width: 560)
         .fixedSize(horizontal: false, vertical: true)
+        .onChange(of: store.reviewHome) { store.save() }
+        .onChange(of: store.reviewModel) { store.save() }
+        .onChange(of: store.reviewWhenSessionStops) { store.save() }
         .onChange(of: store.agentQueueLimit) { store.save() }
         .onChange(of: store.agentQueueSkipPermissions) { store.save() }
         .onChange(of: store.agentQueueAskClaude) { store.save() }

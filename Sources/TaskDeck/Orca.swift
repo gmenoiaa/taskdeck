@@ -46,6 +46,11 @@ enum Orca {
         let isMain: Bool
         let createdAt: Date?
         var status: Status
+        /// The pane ("tab:leaf") of the agent Orca's own launcher started last; nil for an agent
+        /// started by a typed command.
+        var agentPane: String?
+        /// What the user last typed to that agent.
+        var lastPrompt: String?
     }
 
     struct PullRequest: Hashable {
@@ -95,14 +100,7 @@ enum Orca {
 
     /// An app started from the Dock has a short PATH, so the usual install places are checked directly.
     static var executable: String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "/usr/local/bin/orca",
-            "/opt/homebrew/bin/orca",
-            "\(home)/.local/bin/orca",
-            "/Applications/Orca.app/Contents/Resources/bin/orca",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        Shell.find("orca", also: ["/Applications/Orca.app/Contents/Resources/bin/orca"])
     }
 
     static var isInstalled: Bool { executable != nil }
@@ -316,8 +314,11 @@ enum Orca {
         // terminal a new one, and switching to the old one does nothing. So the worktree's live
         // terminals are asked for each time.
         var handle: String?
-        if let path = session.path,
-           let answer = try? await run(["terminal", "list", "--worktree", "path:\(path)"]) {
+        // By the worktree's id where it is known: several of Orca's workspaces can sit on one
+        // folder, and the path then names none of them (no terminals come back) or another one.
+        let selector = session.worktreeId.map { "id:\($0)" } ?? session.path.map { "path:\($0)" }
+        if let selector,
+           let answer = try? await run(["terminal", "list", "--worktree", selector]) {
             let live = terminals(in: answer)
             handle = live.first { $0["handle"] as? String == session.terminalHandle }?["handle"] as? String
                 // The agent's terminal rather than a plain shell opened beside it.
@@ -401,11 +402,43 @@ enum Orca {
             let branch = (row["branch"] as? String ?? "").replacingOccurrences(of: "refs/heads/", with: "")
             // Orca gives times in milliseconds.
             let created = (row["createdAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+            let agents = row["agents"] as? [[String: Any]] ?? []
+            let latest = agents.max { ($0["updatedAt"] as? Double ?? 0) < ($1["updatedAt"] as? Double ?? 0) }
+            let prompt = (latest?["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             return Worktree(id: id, repoId: repoId, repoName: row["repo"] as? String ?? "",
                             name: row["displayName"] as? String ?? URL(fileURLWithPath: path).lastPathComponent,
                             branch: branch, path: path, isMain: row["isMainWorktree"] as? Bool ?? false,
-                            createdAt: created, status: status(of: row))
+                            createdAt: created, status: status(of: row),
+                            agentPane: latest?["paneKey"] as? String,
+                            lastPrompt: (prompt ?? "").isEmpty ? nil : prompt)
         }
+    }
+
+    /// What the agent's terminal shows right now: one screen, as rendered. Nil when the agent's
+    /// terminal cannot be told apart from a plain shell opened beside it: a shell may show
+    /// anything, and this text is sent on to the review.
+    static func screen(of tree: Worktree, savedHandle: String?) async -> String? {
+        guard let answer = try? await run(["terminal", "list", "--worktree", "id:\(tree.id)"]) else { return nil }
+        let live = terminals(in: answer)
+        func pane(_ terminal: [String: Any]) -> String? {
+            guard let tab = terminal["tabId"] as? String, let leaf = terminal["leafId"] as? String else { return nil }
+            return "\(tab):\(leaf)"
+        }
+        let found = live.first { tree.agentPane != nil && pane($0) == tree.agentPane }
+            ?? live.first { savedHandle != nil && $0["handle"] as? String == savedHandle }
+            ?? live.filter { $0["agentIdentity"] is String }
+                .max { ($0["lastOutputAt"] as? Double ?? 0) < ($1["lastOutputAt"] as? Double ?? 0) }
+        guard let handle = found?["handle"] as? String,
+              let read = try? await run(["terminal", "read", "--terminal", handle, "--screen"]),
+              let terminal = read["terminal"] as? [String: Any],
+              // A screen that could not be rendered comes back as raw output, which is unreadable
+              // for a program that repaints its lines.
+              terminal["source"] as? String != "screen-unavailable",
+              let rows = terminal["tail"] as? [String] else { return nil }
+        let rule = CharacterSet(charactersIn: "─━═-_ ")
+        let lines = rows.map { $0.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
+            .filter { !$0.isEmpty && !$0.unicodeScalars.allSatisfy(rule.contains) }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     /// Whether a ticket reference appears in a worktree's name or branch as a whole word:
@@ -596,60 +629,11 @@ enum Orca {
         throw Failure.failed(message(reply: reply, status: status, out: out, err: err))
     }
 
-    /// What a finished command left behind, filled in from three queues at once.
-    private final class Collected: @unchecked Sendable {
-        var out = Data()
-        var err = Data()
-    }
-
-    /// Runs a command off the main thread and returns its exit status and output.
-    /// The end is learnt from the process's termination handler. `waitUntilExit` was used before and
-    /// sometimes never returned for a command that had already finished; every later refresh then
-    /// waited behind it, and the cards kept showing what was true at that moment.
+    /// Creating a worktree is the slowest thing asked of Orca, and it takes seconds; the shared
+    /// runner's limit is far above that.
     private static func exec(_ executable: String, _ args: [String]) async throws -> (status: Int32, out: Data, err: Data) {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = args
-            // Outside any repository, so Orca never infers a worktree from where this app was started.
-            process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-            let outPipe = Pipe(), errPipe = Pipe()
-            process.standardOutput = outPipe
-            process.standardError = errPipe
-            process.standardInput = FileHandle.nullDevice
-
-            let collected = Collected()
-            let finished = DispatchGroup()
-            finished.enter()
-            process.terminationHandler = { _ in finished.leave() }
-            do {
-                try process.run()
-            } catch {
-                process.terminationHandler = nil
-                continuation.resume(throwing: error)
-                return
-            }
-            // Both pipes are drained while the command runs; a full pipe would block it forever.
-            let queue = DispatchQueue.global(qos: .userInitiated)
-            finished.enter()
-            queue.async {
-                collected.out = outPipe.fileHandleForReading.readDataToEndOfFile()
-                finished.leave()
-            }
-            finished.enter()
-            queue.async {
-                collected.err = errPipe.fileHandleForReading.readDataToEndOfFile()
-                finished.leave()
-            }
-            // A command that hangs must not hold up everything after it. Creating a worktree is the
-            // slowest thing asked of Orca, and it takes seconds.
-            queue.asyncAfter(deadline: .now() + 180) {
-                if process.isRunning { process.terminate() }
-            }
-            finished.notify(queue: queue) {
-                continuation.resume(returning: (process.terminationStatus, collected.out, collected.err))
-            }
-        }
+        let result = try await Shell.run(executable, args)
+        return (result.status, result.out, result.err)
     }
 
     private static func message(reply: [String: Any]?, status: Int32, out: Data, err: Data) -> String {
