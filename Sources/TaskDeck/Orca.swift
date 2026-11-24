@@ -54,6 +54,28 @@ enum Orca {
         let state: String
     }
 
+    struct PullRequestDetail: Hashable {
+        let number: Int
+        let title: String
+        /// The description as written, Markdown and all.
+        let body: String
+        /// "open", "merged" or "closed".
+        let state: String
+        let draft: Bool
+        let createdAt: Date?
+        let mergedAt: Date?
+        let closedAt: Date?
+
+        /// What happened to it in the period, latest first: "merged", then "opened".
+        func events(in period: DateInterval) -> [(String, Date)] {
+            var out: [(String, Date)] = []
+            if let mergedAt, period.contains(mergedAt) { out.append(("merged", mergedAt)) }
+            else if let closedAt, state == "closed", period.contains(closedAt) { out.append(("closed without merging", closedAt)) }
+            if let createdAt, period.contains(createdAt) { out.append(("opened", createdAt)) }
+            return out
+        }
+    }
+
     /// Agents offered in the app. Orca knows more ids; these are the two it manages accounts for.
     static let agents: [(id: String, label: String)] = [("claude", "Claude"), ("codex", "Codex")]
 
@@ -181,16 +203,7 @@ enum Orca {
         guard let gh = ghExecutable else { return nil }
         let list = ["pr", "list", "--repo", slug, "--head", branch, "--state", "all",
                     "--json", "number,state", "--limit", "10"]
-        let reply: (status: Int32, out: Data, err: Data)?
-        if let account, !account.isEmpty {
-            // The token goes from gh's keyring to gh inside the shell; this app never reads it.
-            // Without a token nothing is asked: gh would silently answer as the active account.
-            let script = "T=\"$(\"$0\" auth token --user \"$1\")\"; [ -n \"$T\" ] || exit 9; shift; GH_TOKEN=\"$T\" exec \"$0\" \"$@\""
-            reply = try? await exec("/bin/sh", ["-c", script, gh, account] + list)
-        } else {
-            reply = try? await exec(gh, list)
-        }
-        guard let reply, reply.status == 0,
+        guard let reply = await runGH(gh, list, account: account), reply.status == 0,
               let rows = (try? JSONSerialization.jsonObject(with: reply.out)) as? [[String: Any]] else { return nil }
         let found = rows.compactMap { row -> PullRequest? in
             guard let number = row["number"] as? Int, let state = row["state"] as? String else { return nil }
@@ -199,6 +212,34 @@ enum Orca {
         // A branch reused after a merge has several; the one still open is the one that matters.
         let best = found.first { $0.state == "open" } ?? found.first { $0.state == "merged" } ?? found.first
         return .some(best)
+    }
+
+    /// Runs gh as the given account, or as gh's active one when none is given.
+    private static func runGH(_ gh: String, _ args: [String], account: String?) async -> (status: Int32, out: Data, err: Data)? {
+        guard let account, !account.isEmpty else { return try? await exec(gh, args) }
+        // The token goes from gh's keyring to gh inside the shell; this app never reads it.
+        // Without a token nothing is asked: gh would silently answer as the active account.
+        let script = "T=\"$(\"$0\" auth token --user \"$1\")\"; [ -n \"$T\" ] || exit 9; shift; GH_TOKEN=\"$T\" exec \"$0\" \"$@\""
+        return try? await exec("/bin/sh", ["-c", script, gh, account] + args)
+    }
+
+    /// A pull request's title, draft flag and dates, for the standup. Orca and the branch lookup
+    /// give only its number and state. Nil when gh is missing or GitHub did not answer.
+    static func pullRequestDetail(_ url: URL, account: String?) async -> PullRequestDetail? {
+        guard let gh = ghExecutable else { return nil }
+        let args = ["pr", "view", url.absoluteString, "--json", "number,title,body,state,isDraft,createdAt,mergedAt,closedAt"]
+        guard let reply = await runGH(gh, args, account: account), reply.status == 0,
+              let row = (try? JSONSerialization.jsonObject(with: reply.out)) as? [String: Any],
+              let number = row["number"] as? Int, let state = row["state"] as? String else { return nil }
+        let iso = ISO8601DateFormatter()
+        // GitHub sends an empty string (or the zero date) for what has not happened yet.
+        func date(_ key: String) -> Date? {
+            (row[key] as? String).flatMap { iso.date(from: $0) }.flatMap { $0.timeIntervalSince1970 > 0 ? $0 : nil }
+        }
+        return PullRequestDetail(number: number, title: row["title"] as? String ?? "",
+                                 body: row["body"] as? String ?? "", state: state.lowercased(),
+                                 draft: row["isDraft"] as? Bool ?? false, createdAt: date("createdAt"),
+                                 mergedAt: date("mergedAt"), closedAt: date("closedAt"))
     }
 
     /// "~/.claude-work" as a full path. Nil when it is not an existing directory.

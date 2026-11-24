@@ -67,8 +67,44 @@ struct StandupFacts {
                 guard let status = store.status(of: session) else { continue }
                 let started = period.contains(session.startedAt) ? ", started \(when(session.startedAt))" : ""
                 facts.append("Agent session: \(Claude.sessionState(status.kind))\(started)")
+                if let number = status.prNumber {
+                    facts.append(pullRequestFact(number, status: status, detail: store.pullRequest(of: session)))
+                }
             }
             return facts
+        }
+        func day(_ date: Date) -> String { date.formatted(.dateTime.day().month(.abbreviated)) }
+        // The dates say whether it happened in the period: a pull request merged last week is not
+        // yesterday's work, though its session still says "merged".
+        func pullRequestFact(_ number: Int, status: Orca.Status, detail: Orca.PullRequestDetail?) -> String {
+            var fact = "Pull request #\(number)"
+            if let title = detail?.title, !title.isEmpty { fact += " \"\(title)\"" }
+            if status.kind == .prOpen, detail?.draft ?? status.prDraft { fact += " (draft)" }
+            guard let detail else { return fact }
+            let events = detail.events(in: period)
+            if !events.isEmpty {
+                // In the order they happened; "; " because the times have commas of their own.
+                fact += ": " + events.reversed().map { "\($0.0) \(when($0.1))" }.joined(separator: "; ") + " (in the period)"
+                // Only for news: an older pull request's description says nothing about the period.
+                // On one line and clipped, like comments: templates and checklists run long.
+                let body = detail.body.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                if !body.isEmpty {
+                    fact += ". Description: " + (body.count > 400 ? String(body.prefix(400)) + " […]" : body)
+                }
+                return fact
+            }
+            if let merged = detail.mergedAt { return fact + ": merged \(day(merged)), before the period" }
+            if let closed = detail.closedAt { return fact + ": closed without merging \(day(closed)), before the period" }
+            if let opened = detail.createdAt { return fact + ": open since \(day(opened))" }
+            return fact
+        }
+        // A pull request opened, merged or closed in the period, for the plain list.
+        func pullRequestNews(_ task: TaskItem) -> String? {
+            let news = store.sessions(of: task).compactMap { session -> String? in
+                guard let detail = store.pullRequest(of: session), let event = detail.events(in: period).first else { return nil }
+                return "PR #\(detail.number) \(event.0)"
+            }
+            return news.isEmpty ? nil : news.joined(separator: ", ")
         }
         // Only what was already read from the tracker; nothing is fetched for a standup. Comment
         // dates are kept as display text, so Claude is told the period and judges which are recent.
@@ -89,7 +125,10 @@ struct StandupFacts {
         let worked = tasks.compactMap { task -> (TaskItem, TimeInterval, [ColumnMove], Bool)? in
             let tracked = task.tracked(in: period, now: now)
             let moves = task.moves(in: period)
-            let agent = store.sessions(of: task).contains { period.contains($0.startedAt) }
+            // A merge is work done even on a day with no timer: the review and fixes happen elsewhere.
+            let agent = store.sessions(of: task).contains { session in
+                period.contains(session.startedAt) || !(store.pullRequest(of: session)?.events(in: period).isEmpty ?? true)
+            }
             guard tracked >= 60 || !moves.isEmpty || agent else { return nil }
             return (task, tracked, moves, agent)
         }
@@ -103,11 +142,14 @@ struct StandupFacts {
                 line.details.append("Moved: " + moves.map { "to \(columnName($0.column)) (\(when($0.at)))" }.joined(separator: ", "))
             }
             line.details += baseFacts(task) + comments(task)
+            var notes: [String] = []
             if store.isDone(task) {
-                line.note = "done"
+                notes.append("done")
             } else if let last = moves.last {
-                line.note = "moved to \(columnName(last.column))"
+                notes.append("moved to \(columnName(last.column))")
             }
+            if let news = pullRequestNews(task) { notes.append(news) }
+            line.note = notes.isEmpty ? nil : notes.joined(separator: ", ")
             workedOn.append(line)
             seen.insert(task.id)
         }

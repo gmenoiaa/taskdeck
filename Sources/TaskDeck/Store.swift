@@ -74,6 +74,9 @@ final class AppStore {
     var removingWorktrees: Set<String> = []
     /// Pull requests found by asking GitHub directly, by worktree id, for when Orca reports none.
     @ObservationIgnored private var pullRequests: [String: Orca.PullRequest] = [:]
+    /// Title, draft flag and dates of the agent sessions' pull requests, by their page. Read for
+    /// a standup only; a merged or closed one is not asked about again.
+    @ObservationIgnored private var pullRequestDetails: [URL: Orca.PullRequestDetail] = [:]
     @ObservationIgnored private var pullRequestAsked: [String: Date] = [:]
     @ObservationIgnored private var orcaRepos: [Orca.Repo] = []
     @ObservationIgnored private var orcaReposAt = Date.distantPast
@@ -1058,7 +1061,8 @@ final class AppStore {
     func refreshSpace(_ spaceId: UUID) async -> (failed: Int, total: Int) {
         guard let space = project(spaceId) else { return (0, 0) }
         let targets = tasks.filter { $0.projectId == spaceId && !$0.archived && TicketFetcher.canFetch(project: space, task: $0) }
-        async let sessions: Void = refreshSessionStatuses(force: true)
+        // The pull requests are known only once the sessions are.
+        async let sessions: Void = { await self.refreshSessionStatuses(force: true); await self.refreshPullRequests(space: space) }()
         async let assigned: Void = refreshAssigned(space: space)
         @Sendable func read(_ task: TaskItem) async -> (UUID, TicketDetail?) {
             (task.id, try? await TicketFetcher.fetch(project: space, ref: task.ref, url: task.url))
@@ -1079,6 +1083,38 @@ final class AppStore {
         }
         _ = await (sessions, assigned)
         return (failed, targets.count)
+    }
+
+    /// The pull request of an agent session, as last read from GitHub for a standup.
+    func pullRequest(of session: AgentSession) -> Orca.PullRequestDetail? {
+        status(of: session)?.prURL.flatMap { pullRequestDetails[$0] }
+    }
+
+    /// Reads the pull requests of a space's agent sessions from GitHub, a few at a time.
+    func refreshPullRequests(space: Project) async {
+        var due: [(url: URL, account: String?)] = []
+        for task in tasks where task.projectId == space.id {
+            for session in sessions(of: task) {
+                guard let url = status(of: session)?.prURL, !due.contains(where: { $0.url == url }) else { continue }
+                if let known = pullRequestDetails[url], known.state != "open" { continue }
+                due.append((url, session.githubAccount ?? space.githubAccount))
+            }
+        }
+        await withTaskGroup(of: (URL, Orca.PullRequestDetail?).self) { group in
+            var next = 0
+            func add() {
+                guard next < due.count else { return }
+                let item = due[next]
+                next += 1
+                group.addTask { (item.url, await Orca.pullRequestDetail(item.url, account: item.account)) }
+            }
+            for _ in 0..<Self.spaceRefreshWidth { add() }
+            for await (url, detail) in group {
+                // A failed question keeps what was known.
+                if let detail { pullRequestDetails[url] = detail }
+                add()
+            }
+        }
     }
 
     /// Redmine tasks with tracked time that was not sent yet, most pending time first.
