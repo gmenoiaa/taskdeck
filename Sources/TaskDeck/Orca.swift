@@ -314,8 +314,11 @@ enum Orca {
         // terminal a new one, and switching to the old one does nothing. So the worktree's live
         // terminals are asked for each time.
         var handle: String?
-        if let path = session.path,
-           let answer = try? await run(["terminal", "list", "--worktree", "path:\(path)"]) {
+        // By the worktree's id where it is known: several of Orca's workspaces can sit on one
+        // folder, and the path then names none of them (no terminals come back) or another one.
+        let selector = session.worktreeId.map { "id:\($0)" } ?? session.path.map { "path:\($0)" }
+        if let selector,
+           let answer = try? await run(["terminal", "list", "--worktree", selector]) {
             let live = terminals(in: answer)
             handle = live.first { $0["handle"] as? String == session.terminalHandle }?["handle"] as? String
                 // The agent's terminal rather than a plain shell opened beside it.
