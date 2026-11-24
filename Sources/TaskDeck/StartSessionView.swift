@@ -10,7 +10,15 @@ struct StartSessionView: View {
     let detail: TicketDetail?
 
     @State private var repos: [Orca.Repo] = []
+    /// An Orca repository's id, or one of the two `Self.clone` / `Self.folder` choices below.
     @State private var repoId = ""
+    /// What to clone, as typed: "owner/name" or a github.com address.
+    @State private var cloneSource = ""
+    @State private var folderName = ""
+    /// Where the clone or the new folder goes, as typed. Suggested from where the repositories are.
+    @State private var parent = ""
+    /// What `start` is doing, shown beside the spinner.
+    @State private var progress = ""
     @State private var agent = Orca.agents[0].id
     @State private var name = ""
     @State private var claudeHome = ""
@@ -19,6 +27,10 @@ struct StartSessionView: View {
     @State private var loading = true
     @State private var starting = false
     @State private var error: String?
+
+    /// Picker choices that make a repository instead of naming one. Orca's ids are UUIDs.
+    private static let clone = "+clone"
+    private static let folder = "+folder"
 
     private var task: TaskItem? { store.task(taskId) }
     private var project: Project? { store.project(task?.projectId) }
@@ -37,8 +49,29 @@ struct StartSessionView: View {
     private var homeMissing: Bool {
         agent == "claude" && !homeTyped.isEmpty && Orca.resolvedHome(homeTyped) == nil
     }
+    private var cloneSlug: String? { Orca.githubSlug(cloneSource) }
+    /// The folder the clone or the new folder would be, or why it cannot be made. Nil while the
+    /// name is still empty, so nothing is complained about before the user typed.
+    private var destination: Result<String, Error>? {
+        let name: String
+        switch repoId {
+        case Self.clone:
+            guard let slug = cloneSlug else { return nil }
+            name = String(slug.split(separator: "/").last ?? "")
+        case Self.folder:
+            name = folderName.trimmingCharacters(in: .whitespaces)
+            if name.isEmpty { return nil }
+        default: return nil
+        }
+        return Result { try Orca.newDirectoryPath(named: name, in: parent) }
+    }
+    private var hasRepository: Bool {
+        if repo != nil { return true }
+        if case .success = destination { return true }
+        return false
+    }
     private var canStart: Bool {
-        !starting && repo != nil && !homeMissing
+        !starting && hasRepository && !homeMissing
             && !name.trimmingCharacters(in: .whitespaces).isEmpty
             && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -67,8 +100,40 @@ struct StartSessionView: View {
                             ForEach(otherRepos) { Text($0.name).tag($0.id) }
                         }
                     }
+                    Divider()
+                    Text("Clone from GitHub…").tag(Self.clone)
+                    Text("New folder…").tag(Self.folder)
                 }
-                .disabled(repos.isEmpty)
+                .disabled(loading)
+                if repoId == Self.clone {
+                    TextField("GitHub repository", text: $cloneSource, prompt: Text("owner/name or its address"))
+                        .help("It is cloned with gh, as the GitHub account chosen below, and added to Orca.")
+                    if !cloneSource.trimmingCharacters(in: .whitespaces).isEmpty, cloneSlug == nil {
+                        Text("Type it as owner/name, or paste its github.com address.")
+                            .font(.caption).foregroundStyle(.red)
+                    }
+                } else if repoId == Self.folder {
+                    TextField("Folder name", text: $folderName)
+                        .help("An empty folder is created and added to Orca. It is a plain folder, not a git repository.")
+                }
+                if repoId == Self.clone || repoId == Self.folder {
+                    LabeledContent(repoId == Self.clone ? "Clone into" : "Create in") {
+                        HStack(spacing: 6) {
+                            TextField("Parent folder", text: $parent, prompt: Text("~/Workspace"))
+                                .labelsHidden()
+                            Button("Choose…") { chooseParent() }.tint(nil)
+                        }
+                    }
+                    switch destination {
+                    case .success(let path):
+                        Text(path).font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    case .failure(let problem):
+                        Text(problem.localizedDescription).font(.caption).foregroundStyle(.red)
+                    case nil:
+                        EmptyView()
+                    }
+                }
                 Picker("Agent", selection: $agent) {
                     ForEach(Orca.agents, id: \.id) { Text($0.label).tag($0.id) }
                 }
@@ -101,7 +166,7 @@ struct StartSessionView: View {
                 HStack {
                     if starting {
                         ProgressView().controlSize(.small)
-                        Text("Creating the worktree…").foregroundStyle(.secondary)
+                        Text(progress).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -132,17 +197,39 @@ struct StartSessionView: View {
             } else if spaceRepos.count == 1 {
                 repoId = spaceRepos[0].id
             }
-            if repos.isEmpty { error = "Orca has no repositories yet. Add one in Orca first." }
+            // Beside the space's own repositories when it has any, else where most of them are.
+            parent = Orca.usualParent(of: spaceRepos.isEmpty ? repos : spaceRepos)
+                .map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "~"
         } catch {
             self.error = "Could not read Orca's repositories: \(error.localizedDescription)"
         }
     }
 
     private func start() async {
-        guard let task, let repo else { return }
+        guard let task else { return }
         starting = true
         error = nil
         defer { starting = false }
+        let repo: Orca.Repo
+        do {
+            if let chosen = self.repo {
+                repo = chosen
+            } else if repoId == Self.clone, let slug = cloneSlug {
+                progress = "Cloning \(slug)…"
+                repo = try await Orca.cloneRepository(slug: slug, into: parent, account: githubAccount)
+                adopt(repo)
+            } else if repoId == Self.folder {
+                progress = "Creating the folder…"
+                repo = try await Orca.createFolder(named: folderName, in: parent)
+                adopt(repo)
+            } else {
+                return
+            }
+        } catch {
+            self.error = "The repository could not be added: \(error.localizedDescription)"
+            return
+        }
+        progress = "Creating the worktree…"
         let comment = [task.displayRef, task.title].filter { !$0.isEmpty }.joined(separator: " ")
         do {
             let session = try await Orca.start(
@@ -154,6 +241,30 @@ struct StartSessionView: View {
             dismiss()
         } catch {
             self.error = "Orca could not start the session: \(error.localizedDescription)"
+        }
+    }
+}
+
+extension StartSessionView {
+    /// Selects a repository that was just made, so a second try after a failed start uses it
+    /// instead of cloning or creating it again.
+    private func adopt(_ repo: Orca.Repo) {
+        if !repos.contains(where: { $0.id == repo.id }) {
+            repos = (repos + [repo]).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        }
+        repoId = repo.id
+    }
+
+    private func chooseParent() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        if let current = Orca.resolvedDirectory(parent) { panel.directoryURL = URL(fileURLWithPath: current) }
+        if panel.runModal() == .OK, let url = panel.url {
+            parent = (url.path as NSString).abbreviatingWithTildeInPath
         }
     }
 }
