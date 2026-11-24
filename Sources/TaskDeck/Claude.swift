@@ -254,17 +254,7 @@ enum Claude {
             if total >= 60 { facts.append("Time tracked: \(Fmt.short(total))" + (task.isRunning ? " (timer running)" : "")) }
             for session in store.sessions(of: task) {
                 if let status = store.status(of: session) {
-                    let state: String
-                    switch status.kind {
-                    case .working: state = "working"
-                    case .yourTurn: state = "waiting for the developer"
-                    case .prOpen: state = "pull request open"
-                    case .prMerged: state = "pull request merged"
-                    case .prClosed: state = "pull request closed"
-                    case .idle: state = "idle"
-                    case .gone: state = "ended"
-                    }
-                    facts.append("Agent session: \(state)")
+                    facts.append("Agent session: \(sessionState(status.kind))")
                 }
             }
             out += facts.map { "- \($0)" }.joined(separator: "\n") + "\n"
@@ -279,6 +269,70 @@ enum Claude {
             }
         }
         return out
+    }
+
+    /// An agent session's state in words, for the model.
+    static func sessionState(_ kind: Orca.Status.Kind) -> String {
+        switch kind {
+        case .working: return "working"
+        case .yourTurn: return "waiting for the developer"
+        case .prOpen: return "pull request open"
+        case .prMerged: return "pull request merged"
+        case .prClosed: return "pull request closed"
+        case .idle: return "idle"
+        case .gone: return "ended"
+        }
+    }
+
+    // MARK: Daily standup
+
+    static let standupSystem = """
+    You write a developer's daily standup update for one team: what they did since the last \
+    standup, what they will do today, and what blocks them. The developer pastes it into a chat \
+    (Slack, Teams or similar) or reads it out in the meeting, so it must read as their own words.
+
+    You get the facts the developer's task app knows for this team only: tickets with time \
+    tracked, column moves and agent sessions in the period, the board as it is now, tickets that \
+    wait, tickets newly assigned, and sometimes the developer's previous update.
+
+    - Write in the first person, as the developer ("Fixed…", "Reviewing…"). Plain English: short \
+    sentences, common words, active voice.
+    - Use only the facts given. Do not invent work, progress, reasons or people. A ticket with time \
+    tracked was worked on; say it was finished only when it is in a finished column, or closed or \
+    merged in its tracker.
+    - Name each ticket by its reference and a few words of its title, so the team knows which one.
+    - Group small items; leave out a ticket with only a few minutes and nothing else to say.
+    - Today: the work in progress and the timer that is running, then what is due soon. If the \
+    previous update planned something that is still open, it belongs in Today. Do not repeat \
+    finished work there.
+    - Blockers: only real waits: on a person, a decision, a review or another ticket. Write "None" \
+    when there are none. An agent session that waits for the developer is not a blocker.
+    - Comments are dated; use only those from the period, and only for what they say about progress \
+    or blockers.
+    - No time figures unless the instructions below ask for them.
+    - Keep it short: at most five bullets per part.
+
+    Format, so it pastes cleanly into any chat: three parts with the labels "Yesterday:", "Today:" \
+    and "Blockers:" on their own lines, each followed by bullets that start with "- ". No headings, \
+    bold, tables or links. Start directly with "Yesterday:" and add nothing after the last bullet.
+    """
+
+    /// The base instructions, the user's standing instructions, and then one space's own
+    /// instructions, which win over both.
+    static func system(_ base: String, custom: String, space: String) -> String {
+        let general = system(base, custom: custom)
+        let own = space.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !own.isEmpty else { return general }
+        return general + """
+
+
+        The user set the instructions below for this team's update only. Where they conflict with \
+        anything above, including the format and the user's standing instructions, follow these.
+
+        <space_instructions>
+        \(own)
+        </space_instructions>
+        """
     }
 
     static let logCommentSystem = """

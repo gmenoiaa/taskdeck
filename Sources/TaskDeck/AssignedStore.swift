@@ -69,6 +69,19 @@ extension AppStore {
         noticeNewAssignments(complete: complete)
     }
 
+    /// Asks one space's tracker again, for a standup. New tickets are not announced here: the
+    /// regular look over every tracker does that, and needs all of them to compare.
+    func refreshAssigned(space: Project) async {
+        guard space.kind != .other else { return }
+        do {
+            assignedTickets[space.id] = try await TicketFetcher.assigned(project: space)
+            assignedErrors[space.id] = nil
+        } catch {
+            assignedErrors[space.id] = error.localizedDescription
+        }
+        saveAssigned()
+    }
+
     /// Reports tickets that were not assigned to me at the last look. The very first look only
     /// takes note, so the whole backlog is not reported; ignored tickets never are.
     private func noticeNewAssignments(complete: Bool) {

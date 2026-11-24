@@ -28,6 +28,7 @@ struct BoardView: View {
     @State private var selected: UUID?
     @State private var deleting: TaskItem?
     @State private var startingSession: TaskItem?
+    @State private var standup: StandupTarget?
 
     /// Every word typed has to appear somewhere in the task, in any order, ignoring case and accents.
     private func matches(_ task: TaskItem) -> Bool {
@@ -66,6 +67,24 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
     /// How many cards on the board, in the current space, a filter would show.
     private func count(_ filter: BoardFilter) -> Int {
         store.columns.reduce(0) { $0 + store.tasks(in: $1.id, project: self.filter).filter { fits($0, filter) }.count }
+    }
+
+    /// The space whose standup the command opens: the one shown, or with "All spaces" the only
+    /// space that has a standup.
+    private var standupSpace: UUID? {
+        if let filter { return store.project(filter)?.standup?.enabled == true ? filter : nil }
+        let spaces = store.standupSpaces
+        return spaces.count == 1 ? spaces[0].id : nil
+    }
+
+    /// Opens a space's standup sheet over the overview, and takes the request. The space shown
+    /// stays as it is: the sheet names its space, and "All spaces" lists every standup.
+    private func showStandup(_ id: UUID?) {
+        guard let id else { return }
+        store.openStandup = nil
+        guard store.project(id) != nil else { return }
+        tab = "overview"
+        standup = StandupTarget(id: id)
     }
 
     private var filterMenu: some View {
@@ -412,12 +431,16 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             showArchive: { showArchive = true },
             search: focusSearch,
             show: { tab = $0 },
+            standup: standupSpace.map { id in { store.openStandup = id } },
             space: filter,
             showSpace: { filter = $0 }))
         .onAppear {
             // A space deleted since last time falls back to all spaces.
             if let id = UUID(uuidString: savedSpace), store.project(id) != nil { filter = id }
+            // Asked for while the window was closed, by the menu bar or a notification.
+            showStandup(store.openStandup)
         }
+        .onChange(of: store.openStandup) { _, id in showStandup(id) }
         .onChange(of: filter) { _, new in savedSpace = new?.uuidString ?? "" }
         // The window keeps its name for Mission Control and the Window menu; the toolbar has no room for it.
         .modifier(NoToolbarTitle())
@@ -536,6 +559,9 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         }
         .sheet(isPresented: $showImport) {
             ImportView().environment(store)
+        }
+        .sheet(item: $standup) { target in
+            StandupView(spaceId: target.id).environment(store)
         }
     }
 }
@@ -760,6 +786,8 @@ struct BoardActions {
     var search: () -> Void
     /// "overview", "board" or "goals".
     var show: (String) -> Void
+    /// Opens the standup of the space shown; nil when it has none.
+    var standup: (() -> Void)?
     /// The space shown, nil for all spaces.
     var space: UUID?
     var showSpace: (UUID?) -> Void
@@ -794,6 +822,9 @@ struct AppCommands: Commands {
             Button("Log Pending Time…") { board?.logPending?() }
                 .keyboardShortcut("l", modifiers: .command)
                 .disabled(board?.logPending == nil)
+            Button("Write Standup Update…") { board?.standup?() }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(board?.standup == nil)
             Button("Refresh") { Task { await store.refreshEverything() } }
                 .keyboardShortcut("r", modifiers: .command)
             Divider()

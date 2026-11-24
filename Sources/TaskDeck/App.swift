@@ -35,6 +35,7 @@ struct TaskDeckApp: App {
 
 struct MenuBarLabel: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         let running = store.runningTasks
@@ -59,6 +60,14 @@ struct MenuBarLabel: View {
             }) {
                 Image(systemName: "bell.badge.fill")
             }
+        }
+        // The label is the one view that always exists, so it opens the main window when a
+        // standup is asked for (a notification click) while the window is closed. With the window
+        // open, the board takes the request first and this sees nothing to do.
+        .onChange(of: store.openStandup) { _, id in
+            guard id != nil else { return }
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 }

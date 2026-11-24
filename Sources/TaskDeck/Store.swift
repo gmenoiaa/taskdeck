@@ -43,6 +43,13 @@ final class AppStore {
     var ignoredAssigned: Set<String> = []
     /// When the end-of-day reminder about unlogged time was last sent.
     @ObservationIgnored var unloggedRemindedAt: Date?
+    /// The last standup update written for each space, by space id.
+    var standups: [UUID: StandupNote] = [:]
+    /// When each space's standup reminder was last sent, so it comes once a day.
+    @ObservationIgnored var standupRemindedAt: [UUID: Date] = [:]
+    /// A space whose standup sheet should open in the main window: set by the menu bar, a command
+    /// or a notification, and cleared by the window once it shows the sheet. Not saved.
+    var openStandup: UUID?
     /// Since when the user has been at the Mac in one go; nil while away or idle. Not saved.
     var activeSince: Date? = Date()
     @ObservationIgnored var noTimerRemindedAt: Date?
@@ -99,6 +106,9 @@ final class AppStore {
         var ignoredAssigned: [String]?
         var unloggedRemindedAt: Date?
         var goals: [Goal]?
+        /// Keyed by the space's UUID string: dictionaries with UUID keys encode as arrays.
+        var standups: [String: StandupNote]?
+        var standupRemindedAt: [String: Date]?
     }
 
     static var dataURL: URL {
@@ -115,6 +125,7 @@ final class AppStore {
         loadAssigned()
         Notifier.setUp()
         Notifier.onStart = { [weak self] id, since in self?.startTimer(id, from: since) }
+        Notifier.onStandup = { [weak self] id in self?.openStandup = id }
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.now = Date()
@@ -146,6 +157,7 @@ final class AppStore {
                     await self?.runAgentQueue()
                 }
                 self?.noticeTimers()
+                self?.noticeStandups()
                 self?.trackPresence()
                 self?.noticeNoTimer()
                 try? await Task.sleep(for: .seconds(10))
@@ -313,6 +325,8 @@ final class AppStore {
             ignoredAssigned = Set(snap.ignoredAssigned ?? [])
             unloggedRemindedAt = snap.unloggedRemindedAt
             goals = snap.goals ?? []
+            standups = Self.byUUID(snap.standups)
+            standupRemindedAt = Self.byUUID(snap.standupRemindedAt)
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -336,10 +350,22 @@ final class AppStore {
                             clearedWaiting: clearedWaiting.isEmpty ? nil : clearedWaiting.sorted(),
                             announcedPullRequests: announcedPullRequests.isEmpty ? nil : announcedPullRequests.sorted(),
                             ignoredAssigned: ignoredAssigned.isEmpty ? nil : ignoredAssigned.sorted(), unloggedRemindedAt: unloggedRemindedAt,
-                            goals: goals.isEmpty ? nil : goals)
+                            goals: goals.isEmpty ? nil : goals,
+                            standups: standups.isEmpty ? nil : Self.byString(standups),
+                            standupRemindedAt: standupRemindedAt.isEmpty ? nil : Self.byString(standupRemindedAt))
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
+    }
+
+    private static func byUUID<Value>(_ saved: [String: Value]?) -> [UUID: Value] {
+        var out: [UUID: Value] = [:]
+        for (key, value) in saved ?? [:] { if let id = UUID(uuidString: key) { out[id] = value } }
+        return out
+    }
+
+    private static func byString<Value>(_ values: [UUID: Value]) -> [String: Value] {
+        Dictionary(uniqueKeysWithValues: values.map { ($0.key.uuidString, $0.value) })
     }
 
     // MARK: Projects
@@ -363,6 +389,8 @@ final class AppStore {
         for i in tasks.indices where tasks[i].projectId == project.id {
             tasks[i].projectId = nil
         }
+        standups[project.id] = nil
+        standupRemindedAt[project.id] = nil
         Keychain.delete(account: project.keychainAccount)
         Keychain.delete(account: Claude.legacyKeyAccount(project))
         save()
@@ -383,9 +411,12 @@ final class AppStore {
         var task = task
         if let i = tasks.firstIndex(where: { $0.id == task.id }) {
             let moved = tasks[i].status != task.status
+            // The move log is the store's: an edited copy may hold an older one.
+            task.moves = tasks[i].moves
             if moved {
                 task.order = nextOrder
                 task.queueNote = nil
+                task.noteMove(to: task.status)
             }
             tasks[i] = task
             if role(of: task.status) == .done { closeEntries(at: i) }
@@ -410,6 +441,7 @@ final class AppStore {
         tasks[i].archived = false
         let from = role(of: tasks[i].status)
         tasks[i].status = columnId
+        tasks[i].noteMove(to: columnId)
         tasks[i].order = nextOrder
         // Moving a card to In progress is saying "I am on this now". Not from the agents' lane:
         // that card was the agent's work, and picking it up is not the user starting on it.
@@ -568,6 +600,11 @@ final class AppStore {
         }
     }
 
+    func setStandup(_ spaceId: UUID, _ note: StandupNote) {
+        standups[spaceId] = note
+        save()
+    }
+
     func setGoal(_ taskId: UUID, _ goalId: UUID?) {
         guard let i = tasks.firstIndex(where: { $0.id == taskId }), tasks[i].goalId != goalId else { return }
         tasks[i].goalId = goalId
@@ -682,6 +719,7 @@ final class AppStore {
         if current == .backlog || current == .done,
            let target = columns.first(where: { $0.role == .inProgress }) {
             tasks[i].status = target.id
+            tasks[i].noteMove(to: target.id)
             tasks[i].order = nextOrder
         }
         tasks[i].archived = false
@@ -997,9 +1035,50 @@ final class AppStore {
             guard let project = project(task.projectId) else { continue }
             // A ticket that fails (no credentials, offline, deleted) just keeps its last known status.
             if let detail = try? await TicketFetcher.fetch(project: project, ref: task.ref, url: task.url) {
-                setRemote(task.id, from: detail)
+                received(detail, for: task.id)
             }
         }
+    }
+
+    /// A ticket read from its tracker: its status goes on the card, and the whole ticket into the
+    /// cache, so the details, the goal report and the standup have its latest description and
+    /// comments without another request. The cached edit choices stay: this read does not fetch them.
+    func received(_ detail: TicketDetail, for id: UUID) {
+        TicketCache.save(.init(detail: detail, options: TicketCache.load(id)?.options), for: id)
+        setRemote(id, from: detail)
+    }
+
+    /// How many tickets a space refresh reads at once: quicker than one by one, without a burst
+    /// a tracker could take for abuse.
+    private static let spaceRefreshWidth = 4
+
+    /// Reads every open ticket of a space again, with the agents' state and the tickets assigned
+    /// in that tracker, so a standup is written from what the trackers say now. Returns how many
+    /// tickets could not be read; those keep their last saved copy.
+    func refreshSpace(_ spaceId: UUID) async -> (failed: Int, total: Int) {
+        guard let space = project(spaceId) else { return (0, 0) }
+        let targets = tasks.filter { $0.projectId == spaceId && !$0.archived && TicketFetcher.canFetch(project: space, task: $0) }
+        async let sessions: Void = refreshSessionStatuses(force: true)
+        async let assigned: Void = refreshAssigned(space: space)
+        @Sendable func read(_ task: TaskItem) async -> (UUID, TicketDetail?) {
+            (task.id, try? await TicketFetcher.fetch(project: space, ref: task.ref, url: task.url))
+        }
+        var failed = 0
+        await withTaskGroup(of: (UUID, TicketDetail?).self) { group in
+            var next = 0
+            for task in targets.prefix(Self.spaceRefreshWidth) { group.addTask { await read(task) } }
+            next = min(Self.spaceRefreshWidth, targets.count)
+            for await (id, detail) in group {
+                if let detail { received(detail, for: id) } else { failed += 1 }
+                if next < targets.count {
+                    let task = targets[next]
+                    next += 1
+                    group.addTask { await read(task) }
+                }
+            }
+        }
+        _ = await (sessions, assigned)
+        return (failed, targets.count)
     }
 
     /// Redmine tasks with tracked time that was not sent yet, most pending time first.

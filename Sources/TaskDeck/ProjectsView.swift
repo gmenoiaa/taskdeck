@@ -126,6 +126,8 @@ struct ProjectEditor: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                StandupSection(settings: Binding(get: { project.standup ?? StandupSettings() },
+                                                 set: { project.standup = $0 }))
                 if Browser.kinds.contains(where: \.isInstalled) {
                     Section("Links") {
                         Picker("Open links in", selection: Binding(
@@ -188,6 +190,12 @@ struct ProjectEditor: View {
                     project.claudeHome = home.isEmpty ? nil : home
                     let prompt = (project.sessionPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     project.sessionPrompt = prompt.isEmpty ? nil : prompt
+                    if var standup = project.standup {
+                        standup.instructions = standup.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+                        // Never set up: nothing worth keeping in the file. Turned off after a setup:
+                        // the time and days stay for when it is turned on again.
+                        project.standup = standup == StandupSettings() ? nil : standup
+                    }
                     if project.kind != .other {
                         Keychain.set(apiKey, account: project.keychainAccount)
                     }
@@ -237,6 +245,74 @@ struct ProjectEditor: View {
         } catch {
             testOK = false
             testResult = error.localizedDescription
+        }
+    }
+}
+
+/// A space's daily standup: whether it has one, when, and how its update should read.
+struct StandupSection: View {
+    @Binding var settings: StandupSettings
+
+    /// The meeting time as a date today, for the time picker; only hour and minute are kept.
+    private var time: Binding<Date> {
+        Binding(
+            get: { Calendar.current.date(bySettingHour: settings.hour, minute: settings.minute, second: 0, of: Date()) ?? Date() },
+            set: {
+                let parts = Calendar.current.dateComponents([.hour, .minute], from: $0)
+                settings.hour = parts.hour ?? settings.hour
+                settings.minute = parts.minute ?? settings.minute
+            })
+    }
+
+    /// Weekday numbers in the order this Mac's calendar starts its week.
+    private var weekOrder: [Int] {
+        let first = Calendar.current.firstWeekday
+        return (0..<7).map { (first - 1 + $0) % 7 + 1 }
+    }
+
+    private func day(_ weekday: Int) -> Binding<Bool> {
+        Binding(
+            get: { settings.weekdays.contains(weekday) },
+            set: { on in
+                settings.weekdays.removeAll { $0 == weekday }
+                if on { settings.weekdays = (settings.weekdays + [weekday]).sorted() }
+            })
+    }
+
+    var body: some View {
+        Section("Daily standup") {
+            Toggle("This space has a daily standup", isOn: $settings.enabled)
+            if settings.enabled {
+                DatePicker("Meeting time", selection: time, displayedComponents: .hourAndMinute)
+                LabeledContent("Days") {
+                    HStack(spacing: 4) {
+                        ForEach(weekOrder, id: \.self) { weekday in
+                            Toggle(isOn: day(weekday)) {
+                                Text(Calendar.current.veryShortWeekdaySymbols[weekday - 1]).frame(minWidth: 14)
+                            }
+                            .toggleStyle(.button)
+                            .help(Calendar.current.weekdaySymbols[weekday - 1])
+                        }
+                    }
+                }
+                Picker("Remind me", selection: $settings.remindMinutes) {
+                    Text("No reminder").tag(0)
+                    ForEach([5, 10, 15, 30], id: \.self) { Text("\($0) minutes before").tag($0) }
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Instructions for this space's update")
+                    TextEditor(text: $settings.instructions)
+                        .font(.callout)
+                        .frame(minHeight: 60)
+                }
+                Text("For example: “In Portuguese. Three bullets per part at most. No time figures.” Added to the instructions in Settings → AI; where they disagree, these win.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if settings.weekdays.isEmpty {
+                    Label("No day is ticked, so there is no reminder and the update covers the last 24 hours.",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
         }
     }
 }

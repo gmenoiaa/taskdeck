@@ -212,6 +212,11 @@ private struct NotificationSettingsTab: View {
                 Text("The reminder about working with no timer is in General.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Daily standup") {
+                Toggle("Before a space's standup", isOn: $store.notify.standup)
+                Text("The meeting time, the days and how early to remind are set per space in Settings → Spaces.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Dock badge") {
                 Picker("Shows", selection: $store.notify.badge) {
                     Text("Things waiting for me").tag(NotificationSettings.DockBadge.waiting)

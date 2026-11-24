@@ -33,6 +33,8 @@ struct NotificationSettings: Codable, Equatable {
     /// The banner's sound: empty for the macOS default, `none` for silence, otherwise the name
     /// of one of the system sounds bundled with the app ("Glass", "Submarine"…).
     var sound = ""
+    /// Before a space's daily standup, by the minutes set on that space.
+    var standup = true
 
     enum DockBadge: String, Codable { case waiting, timer, none }
 
@@ -57,6 +59,7 @@ struct NotificationSettings: Codable, Equatable {
         noTimerWeekends = try c.decodeIfPresent(Bool.self, forKey: .noTimerWeekends) ?? false
         autoStartInProgress = try c.decodeIfPresent(Bool.self, forKey: .autoStartInProgress) ?? true
         sound = try c.decodeIfPresent(String.self, forKey: .sound) ?? ""
+        standup = try c.decodeIfPresent(Bool.self, forKey: .standup) ?? true
     }
 }
 
@@ -192,6 +195,24 @@ extension AppStore {
 
     /// The two reminders about time: stopped time not logged at the end of the day, and a timer that
     /// has been running for hours. Called every few seconds; each sends at most once per occasion.
+    /// A reminder shortly before each space's standup, once a day.
+    func noticeStandups() {
+        // Asleep or locked, a banner would arrive late or unseen; the menu bar still offers the update.
+        guard notify.standup, !isAway else { return }
+        let now = Date()
+        for space in standupSpaces {
+            guard let meeting = space.standup?.reminderDue(now: now, lastReminded: standupRemindedAt[space.id]) else { continue }
+            standupRemindedAt[space.id] = now
+            save()
+            let time = meeting.formatted(date: .omitted, time: .shortened)
+            Notifier.send(title: "Standup at \(time) · \(space.name)",
+                          body: currentStandup(space, now: now) == nil
+                              ? "Click to have the update written."
+                              : "Your update is written. Click to open and copy it.",
+                          standup: space.id)
+        }
+    }
+
     func noticeTimers() {
         let now = Date()
         // Away from the Mac, the question asked on return covers the running timer.
@@ -236,6 +257,10 @@ enum Notifier {
         func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                     withCompletionHandler completionHandler: @escaping () -> Void) {
             let info = response.notification.request.content.userInfo
+            if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+               let id = (info["standup"] as? String).flatMap(UUID.init(uuidString:)) {
+                Task { @MainActor in Notifier.onStandup?(id) }
+            }
             if response.actionIdentifier == Notifier.startAction,
                let id = (info["task"] as? String).flatMap(UUID.init(uuidString:)), let since = info["since"] as? Double {
                 Task { @MainActor in Notifier.onStart?(id, Date(timeIntervalSince1970: since)) }
@@ -269,6 +294,8 @@ enum Notifier {
     private static let startCategory = "no-timer"
     /// Set by the store: the reminder's "Start Timer" button.
     @MainActor static var onStart: ((UUID, Date) -> Void)?
+    /// Set by the store: a click on a standup reminder opens that space's update.
+    @MainActor static var onStandup: ((UUID) -> Void)?
 
     static func setUp() {
         guard available else { return }
@@ -284,7 +311,7 @@ enum Notifier {
 
     /// With `startTask`, the notification carries a "Start Timer" button for that task, counting
     /// from `since`.
-    static func send(title: String, body: String, startTask: UUID? = nil, since: Date? = nil) {
+    static func send(title: String, body: String, startTask: UUID? = nil, since: Date? = nil, standup: UUID? = nil) {
         guard available else { return }
         let content = UNMutableNotificationContent()
         content.title = title
@@ -294,6 +321,7 @@ enum Notifier {
             content.categoryIdentifier = startCategory
             content.userInfo = ["task": startTask.uuidString, "since": since.timeIntervalSince1970]
         }
+        if let standup { content.userInfo = ["standup": standup.uuidString] }
         record(title: title, body: body, problem: nil)
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)) { error in

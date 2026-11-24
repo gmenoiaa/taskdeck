@@ -28,6 +28,15 @@ struct MenuBarView: View {
             .prefix(5))
     }
 
+    /// Standups from half an hour before the meeting until half an hour after it.
+    private var standupsNow: [(space: Project, meeting: Date)] {
+        let now = store.now
+        return store.standupSpaces.compactMap { space in
+            guard let meeting = space.standup?.meetingFor(now), abs(meeting.timeIntervalSince(now)) <= 30 * 60 else { return nil }
+            return (space, meeting)
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -46,6 +55,23 @@ struct MenuBarView: View {
                     .font(.callout).foregroundStyle(.orange)
                     .padding(.horizontal, 12).padding(.vertical, 8)
             }
+            ForEach(standupsNow, id: \.space.id) { item in
+                HStack(spacing: 8) {
+                    Circle().fill(item.space.color).frame(width: 8, height: 8)
+                    Text("Standup \(StandupSettings.label(item.meeting, now: store.now)) · \(item.space.name)")
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Button(store.currentStandup(item.space, now: store.now) == nil ? "Write update" : "Open update") {
+                        store.openStandup = item.space.id
+                        openWindow(id: "main")
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
+                    .controlSize(.small)
+                }
+                .font(.callout)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+            }
+            if !standupsNow.isEmpty { Divider() }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
