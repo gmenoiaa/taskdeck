@@ -19,9 +19,9 @@ enum ReviewDetail: String, CaseIterable, Identifiable {
     var hint: String {
         switch self {
         case .status:
-            return "Sends the ticket reference, its column and dates, and the state of its sessions and pull requests. No titles and nothing an agent wrote."
+            return "Sends the ticket reference, its column, dates and tracker status, the state of its sessions and pull requests, and when someone last commented. No titles, no names, no comment text and nothing an agent wrote."
         case .ticket:
-            return "Also sends the title, the tracker's status and assignee, and the end of the agent's last answer."
+            return "Also sends the title, the assignee, the last comments on the ticket with their authors, and the end of the agent's last answer."
         case .full:
             return "Also sends the agent's whole last answer, what you last typed to it, and what its terminal shows. A terminal can show code and customer data."
         }
@@ -42,6 +42,9 @@ struct ReviewItem: Codable, Hashable, Identifiable {
     var action: String
     /// False for a line the app wrote from its own rules.
     var fromClaude: Bool
+    /// What the line is about, so a dismissed line stays away until that changes: the comment it
+    /// answers to, or else a hash of the task's facts. Optional so reviews saved before it load.
+    var key: String?
 
     var id: UUID { taskId }
 }
@@ -110,6 +113,9 @@ struct ReviewFacts {
         var action: String
         /// The wording for Claude at the status-only level, when `text` names a person.
         var sent: String?
+        /// A guess the app cannot settle alone, such as "this comment may need you". Where Claude
+        /// read the text itself and had nothing to say, the guess is dropped.
+        var soft = false
     }
 
     struct Entry {
@@ -117,8 +123,10 @@ struct ReviewFacts {
         /// Set when the ticket is with someone else or waits in its tracker: nothing here is urgent
         /// for the user. Said first in the task's line, and not worth a line by itself.
         var held: Finding?
-        /// The person the ticket is with, when the tracker names one.
-        var holder: String?
+        /// What a dismissal of this task's line is tied to.
+        var key: String
+        /// Whether Claude gets this task's text (comments, agent answers) and not only its state.
+        var judged = false
         /// "T3": what Claude calls the task, so no id of this app is sent.
         var alias: String
         var findings: [Finding]
@@ -137,11 +145,32 @@ struct ReviewFacts {
     var entries: [Entry] = []
     /// Tasks left out of the request because there were more than `limit`.
     var left = 0
+    /// The stand-in names ("P1") used for people at the status-only level, by stand-in.
+    var people: [String: String] = [:]
 
     /// `trees` is Orca's answer by worktree id; `screens` holds the terminal text already read for
     /// sessions of spaces at the full level.
     init(store: AppStore, trees: [String: Orca.Worktree], screens: [String: String], now: Date = Date()) {
-        var found: [(task: TaskItem, findings: [Finding], lines: [String], held: Finding?, holder: String?)] = []
+        var found: [(task: TaskItem, findings: [Finding], lines: [String], held: Finding?, key: String?, judged: Bool)] = []
+        // The user's own name in each tracker, to tell their comments from other people's: the
+        // assignee of the tickets the tracker lists as assigned to them. Nothing is asked for it.
+        var me: [UUID: String] = [:]
+        for space in store.projects {
+            guard let list = store.assignedTickets[space.id] else { continue }
+            let refs = Set(list.map { $0.ref.lowercased() })
+            let names = store.tasks.filter { $0.projectId == space.id && refs.contains($0.ref.lowercased()) }
+                .compactMap(\.remoteAssignee).filter { !$0.isEmpty }
+            me[space.id] = Dictionary(grouping: names, by: { $0 }).max { $0.value.count < $1.value.count }?.key
+        }
+        // At the status-only level a person goes out as "P1", and the app puts the name back in
+        // what Claude answers.
+        var standIns: [String: String] = [:]
+        func standIn(_ name: String) -> String {
+            if let known = standIns[name] { return known }
+            let made = "P\(standIns.count + 1)"
+            standIns[name] = made
+            return made
+        }
         for task in store.tasks where !store.isDone(task) {
             let space = store.project(task.projectId)
             let detail = space?.review ?? .status
@@ -164,7 +193,29 @@ struct ReviewFacts {
             let waiting = task.remoteStatus.map { status in
                 StandupFacts.waitingWords.contains { status.lowercased().contains($0) }
             } ?? false
-            let held = withOther || waiting
+            // With someone else: assigned to them, or, where the assignment is not known, in a
+            // status that says it waits. A ticket assigned to the user is theirs whatever its status.
+            let held = withOther || (mine == nil && waiting)
+
+            // The last word on the ticket, from what was last read from the tracker. A comment by
+            // someone else after the user's last one is feedback that may need them.
+            let comments = TicketCache.load(task.id)?.detail.comments ?? []
+            let myName = space.flatMap { me[$0.id] }
+            var feedback = comments.last.flatMap { $0.author == myName ? nil : $0 }
+            // A comment is not yet a request. Where the text may be sent, Claude reads it and
+            // decides. At the status-only level the app reads it here, on this Mac, and keeps the
+            // ticket only when what was written since the user's last comment names them. A
+            // question mark alone is not enough: other people ask each other things on a ticket.
+            if feedback != nil, detail == .status {
+                let since = comments.suffix(from: (comments.lastIndex { $0.author == myName }).map { $0 + 1 } ?? comments.startIndex)
+                let first = myName?.split(whereSeparator: { !$0.isLetter }).first.map { $0.lowercased() }
+                let asks = since.contains { comment in
+                    first.map { $0.count > 2 && comment.body.lowercased().contains($0) } ?? false
+                }
+                if !asks { feedback = nil }
+            }
+            // A ticket that is with someone else and has nothing new from them needs nothing.
+            if held, feedback == nil { continue }
 
             var findings: [Finding] = []
             var holding: Finding?
@@ -172,8 +223,14 @@ struct ReviewFacts {
                 let status = task.remoteStatus.map { ", tracker status \($0)" } ?? ""
                 holding = withOther
                     ? Finding(urgency: 3, text: "With \(assignee)\(status).", action: "open_ticket",
-                              sent: "Assigned to someone else\(status).")
+                              sent: "With \(standIn(assignee))\(status).")
                     : Finding(urgency: 3, text: "Waits in the tracker: status \(task.remoteStatus ?? "").", action: "open_ticket")
+            }
+            if let feedback {
+                let what = detail == .status ? "named you in a comment" : "commented last"
+                let whatSent = detail == .status ? "named the developer in a comment" : "commented last"
+                findings.append(Finding(urgency: 2, text: "\(feedback.author) \(what), on \(feedback.date).", action: "open_ticket",
+                                        sent: "\(standIn(feedback.author)) \(whatSent), on \(feedback.date).", soft: true))
             }
             if statuses.contains(where: { $0.1.kind == .yourTurn }) {
                 // Still worth a look, but the ticket does not move on the user's answer alone.
@@ -228,10 +285,19 @@ struct ReviewFacts {
             if detail != .status, let type = task.remoteType { lines.append("Type: \(type)") }
             // Whose ticket it is goes at every level; the person's name only where text may be sent.
             if let mine {
-                let other = assignee.isEmpty ? "nobody" : detail == .status ? "someone else" : assignee
+                let other = assignee.isEmpty ? "nobody" : detail == .status ? standIn(assignee) : assignee
                 lines.append("Assigned to: \(mine ? "the developer" : other)")
             } else if detail != .status, !assignee.isEmpty {
                 lines.append("Assigned to: \(assignee)")
+            }
+            // The comments themselves only where the space lets text out; their order is the tracker's.
+            if detail != .status, !comments.isEmpty {
+                let count = detail == .full ? 5 : 3, length = detail == .full ? 1000 : 500
+                lines.append("Last comments on the ticket, oldest first:")
+                for comment in comments.suffix(count) {
+                    let author = comment.author == myName ? "the developer" : comment.author
+                    lines.append("\(author), \(comment.date):\n" + Self.quoted(Self.clip(comment.body, length, fromEnd: false)))
+                }
             }
             lines.append("Board column: \(column) (\(role.label)), for \(days) day\(days == 1 ? "" : "s")")
             if let due = task.due { lines.append("Due: \(due.formatted(date: .abbreviated, time: .omitted))") }
@@ -258,28 +324,42 @@ struct ReviewFacts {
                 lines.append("The app's own rules say: "
                              + said.map { detail == .status ? ($0.sent ?? $0.text) : $0.text }.joined(separator: " "))
             }
-            found.append((task, findings, lines, holding, withOther ? assignee : nil))
+            found.append((task, findings, lines, holding, feedback.map { "comment:\($0.id)" }, detail != .status))
         }
+        people = Dictionary(standIns.map { ($0.value, $0.key) }, uniquingKeysWith: { first, _ in first })
         // Flagged tasks first, so the limit cuts the quiet ones.
         found.sort { ($0.findings.map(\.urgency).min() ?? 9, $0.task.order) < ($1.findings.map(\.urgency).min() ?? 9, $1.task.order) }
-        left = max(0, found.count - Self.limit)
-        entries = found.prefix(Self.limit).enumerated().map { index, item in
+        let hashed = found.map { item -> (item: (task: TaskItem, findings: [Finding], lines: [String], held: Finding?, key: String?, judged: Bool), text: String, hash: String) in
             let text = item.lines.joined(separator: "\n")
-            let hash = SHA256.hash(data: Data(text.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
-            return Entry(task: item.task, held: item.held, holder: item.holder, alias: "T\(index + 1)", findings: item.findings, text: text, fingerprint: hash)
+            return (item, text, SHA256.hash(data: Data(text.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined())
+        }
+        // A line the user dismissed stays out, and out of the request, until what it was about changes.
+        .filter { store.reviewDismissed[$0.item.task.id.uuidString] != ($0.item.key ?? $0.hash) }
+        left = max(0, hashed.count - Self.limit)
+        entries = hashed.prefix(Self.limit).enumerated().map { index, row in
+            Entry(task: row.item.task, held: row.item.held, key: row.item.key ?? row.hash, judged: row.item.judged, alias: "T\(index + 1)",
+                  findings: row.item.findings, text: row.text, fingerprint: row.hash)
         }
     }
 
     /// The lines the app writes by itself: one per task the rules flagged.
-    var ruleItems: [ReviewItem] {
+    /// `answered` holds the tasks Claude gave a line for, once it has answered. A task whose text
+    /// Claude read and found nothing in loses the app's guesses, and a ticket that is with
+    /// someone else then has no line at all.
+    func ruleItems(answered: Set<UUID>? = nil) -> [ReviewItem] {
         entries.compactMap { entry in
-            let sorted = entry.findings.sorted { $0.urgency < $1.urgency }
+            var findings = entry.findings
+            if let answered, entry.judged, !answered.contains(entry.task.id) {
+                if entry.held != nil { return nil }
+                findings.removeAll(where: \.soft)
+            }
+            let sorted = findings.sorted { $0.urgency < $1.urgency }
             guard let first = sorted.first else { return nil }
             // Whose move it is comes first in the line: it changes how the rest reads.
             let shown = [entry.held].compactMap { $0 } + sorted.prefix(2)
             return ReviewItem(taskId: entry.task.id, urgency: first.urgency,
                               text: shown.map(\.text).joined(separator: " "),
-                              action: first.action, fromClaude: false)
+                              action: first.action, fromClaude: false, key: entry.key)
         }
     }
 
@@ -300,7 +380,11 @@ struct ReviewFacts {
                 // The reference stays, so the summary can still name the task.
                 out += entry.text.split(separator: "\n").prefix(2).joined(separator: "\n") + "\n"
                 if let item = said[id] {
-                    out += "Unchanged since your last review. You said then (urgency \(item.urgency), action \(item.action)): \(item.text)\n"
+                    // What Claude said was stored with the real names put back in; they go out
+                    // under their stand-ins again.
+                    var text = item.text
+                    for (standIn, name) in people { text = text.replacingOccurrences(of: name, with: standIn) }
+                    out += "Unchanged since your last review. You said then (urgency \(item.urgency), action \(item.action)): \(text)\n"
                 } else {
                     out += "Unchanged since your last review, when you had nothing to say about it.\n"
                 }
@@ -336,10 +420,15 @@ struct ReviewFacts {
     request, a merged pull request whose task is still open, an agent that drifted from the ticket \
     or goes in circles, a task that is overdue or has not moved for days. Leave out tasks that are \
     simply going well.
-    - A task assigned to someone else, or whose tracker status says it waits (feedback, on hold, \
-    blocked, pending), is with that person for now. Say so first, and do not call it urgent because \
-    it is overdue or has not moved: at most urgency 2 when an agent waits for the developer there, \
-    otherwise 3.
+    - A task that is with someone else is listed only because that person, or another, commented \
+    after the developer's last comment. Say who commented and, when the comment's text is given, \
+    what it asks of the developer; when the comment needs nothing from the developer, leave the \
+    task out. Do not call such a task urgent because it is overdue or has not moved: at most \
+    urgency 2.
+    - A comment by someone else on a task assigned to the developer is feedback for them: say what \
+    it asks when its text is given.
+    - Some people are named P1, P2 and so on instead of by name. Use those names exactly as given; \
+    the app replaces them.
     - "task" is the block's name exactly, such as "T3".
     - "urgency": 1 when the developer is needed now (an agent is blocked on them, or the task is \
     overdue), 2 for today, 3 for when there is time.
@@ -392,8 +481,16 @@ extension AppStore {
     func reviewItems(space: UUID?) -> [ReviewItem] {
         (review?.items ?? []).filter { item in
             guard let task = tasks.first(where: { $0.id == item.taskId }), !isDone(task) else { return false }
+            if let key = item.key, reviewDismissed[item.taskId.uuidString] == key { return false }
             return space == nil || task.projectId == space
         }
+    }
+
+    /// Hides a line until what it is about changes: a new comment, or different facts.
+    func dismissReview(_ item: ReviewItem) {
+        guard let key = item.key else { return }
+        reviewDismissed[item.taskId.uuidString] = key
+        save()
     }
 
     /// Goes over every open task and its sessions and saves what needs the user. The app's own
@@ -424,7 +521,7 @@ extension AppStore {
 
         let facts = ReviewFacts(store: self, trees: trees, screens: screens)
         let previous = review
-        let rules = facts.ruleItems
+        let rules = facts.ruleItems()
         var next = Review(at: Date(), summary: "", items: rules, home: reviewHome)
 
         if facts.entries.isEmpty {
@@ -433,7 +530,8 @@ extension AppStore {
             // The same request would return the same answer: keep it and spend nothing.
             next = previous
             next.at = Date()
-            next.items = Self.merged(rules: rules, claude: previous.items.filter(\.fromClaude))
+            let kept = previous.items.filter(\.fromClaude)
+            next.items = Self.merged(rules: facts.ruleItems(answered: Set(kept.map(\.taskId))), claude: kept)
             next.note = "Nothing changed since Claude last looked, so it was not asked again."
         } else {
             let system = Claude.system(ReviewFacts.system, custom: aiInstructions)
@@ -443,30 +541,24 @@ extension AppStore {
                 let answer = try await ClaudeCode.ask(ReviewAnswer.self, home: reviewHome, model: reviewModel,
                                                       system: system, user: message, schema: ReviewAnswer.schema)
                 let byAlias = Dictionary(facts.entries.map { ($0.alias, $0.task.id) }, uniquingKeysWith: { first, _ in first })
+                let keys = Dictionary(facts.entries.map { ($0.task.id, $0.key) }, uniquingKeysWith: { first, _ in first })
                 let fromClaude = answer.value.items.compactMap { item -> ReviewItem? in
                     // The alias alone, even when the model added words after it.
                     let alias = String(item.task.prefix { $0 == "T" || $0.isNumber })
                     guard let id = byAlias[alias] else { return nil }
                     let text = item.says.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { return nil }
-                    return ReviewItem(taskId: id, urgency: min(3, max(1, item.urgency)), text: text,
-                                      action: item.action, fromClaude: true)
+                    return ReviewItem(taskId: id, urgency: min(3, max(1, item.urgency)), text: Self.named(text, entries: [], people: facts.people),
+                                      action: item.action, fromClaude: true, key: keys[id])
                 }
                 // Claude sometimes still ranks a ticket that is with someone else as urgent.
-                let held = Dictionary(facts.entries.filter { $0.held != nil }.map { ($0.task.id, $0) },
-                                      uniquingKeysWith: { first, _ in first })
-                next.items = Self.merged(rules: rules, claude: fromClaude.map { item in
+                let held = Set(facts.entries.filter { $0.held != nil }.map(\.task.id))
+                next.items = Self.merged(rules: facts.ruleItems(answered: Set(fromClaude.map(\.taskId))), claude: fromClaude.map { item in
                     var item = item
-                    guard let entry = held[item.taskId] else { return item }
-                    item.urgency = max(item.urgency, 2)
-                    // At the status-only level Claude is not told who has the ticket; the app knows
-                    // and puts the name in where it is shown.
-                    if let holder = entry.holder {
-                        item.text = item.text.replacingOccurrences(of: "someone else", with: holder)
-                    }
+                    if held.contains(item.taskId) { item.urgency = max(item.urgency, 2) }
                     return item
                 })
-                next.summary = Self.named(answer.value.summary.trimmingCharacters(in: .whitespacesAndNewlines), entries: facts.entries)
+                next.summary = Self.named(answer.value.summary.trimmingCharacters(in: .whitespacesAndNewlines), entries: facts.entries, people: facts.people)
                 next.claudeAt = Date()
                 next.inputTokens = answer.inputTokens
                 next.outputTokens = answer.outputTokens
@@ -503,8 +595,13 @@ extension AppStore {
 
     /// The summary with each "T3" replaced by the task's reference, or its title when it has none.
     /// The model is asked to do this itself, but it only knows the task by that name and often keeps it.
-    private static func named(_ summary: String, entries: [ReviewFacts.Entry]) -> String {
+    /// The same for people who went out as "P1".
+    private static func named(_ summary: String, entries: [ReviewFacts.Entry], people: [String: String]) -> String {
         var out = summary
+        for (standIn, name) in people.sorted(by: { $0.key.count > $1.key.count }) {
+            out = out.replacingOccurrences(of: "\\b\(standIn)\\b", with: NSRegularExpression.escapedTemplate(for: name),
+                                           options: .regularExpression)
+        }
         // Longest names first, so "T1" does not eat the start of "T12".
         for entry in entries.sorted(by: { $0.alias.count > $1.alias.count }) {
             let task = entry.task

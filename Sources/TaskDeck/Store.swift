@@ -51,6 +51,8 @@ final class AppStore {
     /// Whether a session that stops starts a review by itself.
     var reviewWhenSessionStops = false
     var reviewing = false
+    /// Review lines the user dismissed, by task id, with what each was about (`ReviewItem.key`).
+    var reviewDismissed: [String: String] = [:]
     /// When a review last started, so automatic ones keep their distance.
     @ObservationIgnored var reviewRanAt: Date?
     /// Exactly what the last request to Claude held, to be read in the app. Not saved.
@@ -128,6 +130,7 @@ final class AppStore {
         var reviewHome: String?
         var reviewModel: String?
         var reviewWhenSessionStops: Bool?
+        var reviewDismissed: [String: String]?
     }
 
     static var dataURL: URL {
@@ -350,6 +353,7 @@ final class AppStore {
             reviewHome = snap.reviewHome ?? ""
             reviewModel = snap.reviewModel ?? ClaudeCode.defaultModel
             reviewWhenSessionStops = snap.reviewWhenSessionStops ?? false
+            reviewDismissed = snap.reviewDismissed ?? [:]
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -377,7 +381,8 @@ final class AppStore {
                             standups: standups.isEmpty ? nil : Self.byString(standups),
                             standupRemindedAt: standupRemindedAt.isEmpty ? nil : Self.byString(standupRemindedAt),
                             review: review, reviewHome: reviewHome.isEmpty ? nil : reviewHome,
-                            reviewModel: reviewModel, reviewWhenSessionStops: reviewWhenSessionStops)
+                            reviewModel: reviewModel, reviewWhenSessionStops: reviewWhenSessionStops,
+                            reviewDismissed: reviewDismissed.isEmpty ? nil : reviewDismissed)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }

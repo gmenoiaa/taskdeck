@@ -81,6 +81,15 @@ struct ReviewSection: View {
                 }
                 Spacer(minLength: 8)
                 action(item, task: task, space: space)
+                if item.key != nil {
+                    Button { store.dismissReview(item) } label: {
+                        Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            .frame(width: 18, height: 18).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Nothing to do here: hide this line until something changes on the task.")
+                    .accessibilityLabel("Dismiss")
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
@@ -94,7 +103,6 @@ struct ReviewSection: View {
         let session = store.headlineSession(of: task)
         let live = session.flatMap { store.status(of: $0) }.map { $0.kind != .gone } ?? false
         let pr = store.sessions(of: task).compactMap { store.status(of: $0)?.prURL }.last
-        let ticket = URL(string: task.url)
         Group {
             switch item.action {
             case "open_pr":
@@ -104,7 +112,8 @@ struct ReviewSection: View {
                 if let session, live { Button("Open in Orca") { Task { await Orca.reveal(session) } } }
                 else if let pr { Button("Open PR") { Browser.open(pr, space: space) } }
             case "open_ticket":
-                if let ticket, !task.url.isEmpty { Button("Open ticket") { Browser.open(ticket, space: space) } }
+                // The ticket view in the app, where its comments are; the browser is one click from there.
+                Button("Open ticket") { onDetails(task) }
             default:
                 EmptyView()
             }
