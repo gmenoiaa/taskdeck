@@ -2,7 +2,7 @@ import Foundation
 
 /// A section of the overview. The user orders and hides them; see `AppStore.overviewPlacements`.
 enum OverviewWidget: String, CaseIterable, Identifiable {
-    case standup, time, chart, sessions, goals, bySpace, topTasks, board
+    case standup, time, chart, calendar, breakdown, sessions, goals, bySpace, topTasks, board
 
     var id: String { rawValue }
 
@@ -12,6 +12,8 @@ enum OverviewWidget: String, CaseIterable, Identifiable {
         case .standup: "Daily standup"
         case .time: "Time"
         case .chart: "Chart"
+        case .calendar: "Calendar"
+        case .breakdown: "Where the time went"
         case .sessions: "Agent sessions"
         case .goals: "Goals"
         case .bySpace: "By space"
@@ -19,6 +21,11 @@ enum OverviewWidget: String, CaseIterable, Identifiable {
         case .board: "On the board"
         }
     }
+
+    /// Hidden until the user asks for it. The two lists say what the chart and "Where the time
+    /// went" already say; they stay for whoever prefers them. A layout the user arranged keeps
+    /// what it had.
+    var hiddenByDefault: Bool { self == .bySpace || self == .topTasks }
 
     /// What a widget being dragged carries. Prefixed so a task card dropped on the overview, which
     /// carries a bare UUID string, is never taken for a widget.
@@ -56,7 +63,7 @@ extension AppStore {
         let all = OverviewWidget.allCases
         for (index, widget) in all.enumerated() where !out.contains(where: { $0.widget == widget }) {
             let before = index > 0 ? out.firstIndex { $0.widget == all[index - 1] } : nil
-            out.insert(OverviewPlacement(widget: widget, hidden: false), at: before.map { $0 + 1 } ?? 0)
+            out.insert(OverviewPlacement(widget: widget, hidden: widget.hiddenByDefault), at: before.map { $0 + 1 } ?? 0)
         }
         return out
     }

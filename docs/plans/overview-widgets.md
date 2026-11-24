@@ -141,6 +141,14 @@ Aggregation (`Store.swift`)
 
 ## Phase 3 — Calendar and breakdown
 
+**Done**, with these differences from what follows:
+
+- The calendar is shown by default, after the chart; it was going to start hidden.
+- It marks due dates only. A standup happens every working day, so marking it would put the
+  same dot on every cell.
+- `bySpace` and `topTasks` are hidden by default. A saved layout that lists them keeps them as
+  they were.
+
 `calendar` widget
 
 - A month grid (`LazyVGrid`, 7 columns, weeks start as `Calendar.current` says). Each day cell is

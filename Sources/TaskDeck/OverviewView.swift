@@ -95,6 +95,15 @@ struct OverviewView: View {
         case .standup: standup(now: moment.now)
         case .time: time(moment)
         case .chart: chart(moment)
+        case .calendar:
+            section(.calendar) {
+                OverviewCalendar(period: moment.period, spaceId: spaceId, now: moment.now) { open(day: $0) }
+            }
+        case .breakdown:
+            section(.breakdown) {
+                OverviewBreakdown(period: moment.period, days: moment.days, spaceId: spaceId, now: moment.now,
+                                  onDetails: onDetails, onGoal: onGoal)
+            }
         case .sessions: sessions
         case .goals: goals(span: moment.span, now: moment.now)
         case .bySpace:
@@ -137,6 +146,14 @@ struct OverviewView: View {
             .pickerStyle(.segmented).labelsHidden().fixedSize()
             quiet(Button("Customise") { withAnimation { customising = true } })
                 .help("Reorder, hide and show the overview's widgets")
+        }
+    }
+
+    /// Shows one day, from a click on the chart or the calendar.
+    private func open(day: Date) {
+        withAnimation {
+            scale = .day
+            anchor = Calendar.current.isDate(day, inSameDayAs: store.now) ? nil : day
         }
     }
 
@@ -358,12 +375,7 @@ struct OverviewView: View {
     private func chart(_ moment: Moment) -> some View {
         section(.chart, title: moment.period.scale == .day ? "Timeline" : "Hours per day") {
             OverviewChart(period: moment.period, days: moment.days, spaceId: spaceId, now: moment.now,
-                          dailyTarget: store.dailyTarget(project: spaceId)) { day in
-                withAnimation {
-                    scale = .day
-                    anchor = Calendar.current.isDate(day, inSameDayAs: store.now) ? nil : day
-                }
-            }
+                          dailyTarget: store.dailyTarget(project: spaceId)) { open(day: $0) }
         }
     }
 
