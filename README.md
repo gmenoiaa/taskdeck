@@ -9,6 +9,7 @@ A native macOS app (SwiftUI) to manage the tasks I work on across several tracke
 - Private notes per task
 - Goals: group tasks from any space with the notes, links, mails and files that go with them; import a Jira epic, Redmine parent issue or GitHub milestone as a goal; ask Claude where a goal stands
 - "Explain" a ticket in simple words with the Claude API
+- Daily standup per space: Claude writes the Yesterday / Today / Blockers update from the space's tasks, to copy into the team chat
 
 ## Build
 

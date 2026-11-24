@@ -117,6 +117,8 @@ struct Project: Identifiable, Codable, Hashable {
     /// id, a Jira project key or a GitHub "owner/repo", and the type chosen there. Preselected next time.
     var createTarget: String?
     var createType: String?
+    /// The space's daily standup; nil for a space that has none set up.
+    var standup: StandupSettings?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }
@@ -130,6 +132,89 @@ struct Project: Identifiable, Codable, Hashable {
         guard let org = githubOrg, !org.isEmpty, let owner = repo.owner else { return false }
         return owner.caseInsensitiveCompare(org) == .orderedSame
     }
+}
+
+/// When and how often a space holds its daily standup, and how its update should read.
+struct StandupSettings: Codable, Hashable {
+    var enabled = false
+    /// Meeting time, local.
+    var hour = 10
+    var minute = 0
+    /// `Calendar` weekday numbers (1 = Sunday); Monday to Friday unless changed.
+    var weekdays: [Int] = [2, 3, 4, 5, 6]
+    /// How long before the meeting the reminder comes; 0 for none.
+    var remindMinutes = 10
+    /// The space's own style for the update: language, format, length.
+    var instructions = ""
+
+    /// An update written this soon after a meeting is still about that meeting, not the next one,
+    /// so the period it covers starts at the meeting before.
+    static let lateWriting: TimeInterval = 3 * 3600
+
+    init() {}
+
+    // Each field on its own: a field added later must not make a saved space lose its standup.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        hour = try c.decodeIfPresent(Int.self, forKey: .hour) ?? 10
+        minute = try c.decodeIfPresent(Int.self, forKey: .minute) ?? 0
+        weekdays = try c.decodeIfPresent([Int].self, forKey: .weekdays) ?? [2, 3, 4, 5, 6]
+        remindMinutes = try c.decodeIfPresent(Int.self, forKey: .remindMinutes) ?? 10
+        instructions = try c.decodeIfPresent(String.self, forKey: .instructions) ?? ""
+    }
+
+    /// The meeting on that day, or nil when the day has none.
+    func meeting(on day: Date, calendar: Calendar = .current) -> Date? {
+        guard weekdays.contains(calendar.component(.weekday, from: day)) else { return nil }
+        return calendar.date(bySettingHour: hour, minute: minute, second: 0, of: day)
+    }
+
+    /// The first meeting at or after `date`; nil when no weekday is ticked.
+    func nextMeeting(after date: Date, calendar: Calendar = .current) -> Date? {
+        for ahead in 0...7 {
+            guard let day = calendar.date(byAdding: .day, value: ahead, to: date),
+                  let meeting = meeting(on: day, calendar: calendar), meeting >= date else { continue }
+            return meeting
+        }
+        return nil
+    }
+
+    /// The meeting to remind of at `now`: today's, when `now` is inside the reminder's window before
+    /// it and no reminder was sent for it yet. Nil otherwise.
+    func reminderDue(now: Date, lastReminded: Date?, calendar: Calendar = .current) -> Date? {
+        guard enabled, remindMinutes > 0, let meeting = meeting(on: now, calendar: calendar),
+              now >= meeting.addingTimeInterval(-TimeInterval(remindMinutes) * 60), now < meeting else { return nil }
+        if let lastReminded, calendar.isDate(lastReminded, inSameDayAs: meeting) { return nil }
+        return meeting
+    }
+
+    /// Where an update written at `date` starts: the meeting before the one it is for. On a Monday
+    /// that is Friday's. With no weekday ticked, the same time a day earlier.
+    func periodStart(for date: Date, calendar: Calendar = .current) -> Date {
+        let cutoff = date.addingTimeInterval(-Self.lateWriting)
+        for back in 0...7 {
+            guard let day = calendar.date(byAdding: .day, value: -back, to: cutoff),
+                  let meeting = meeting(on: day, calendar: calendar), meeting <= cutoff else { continue }
+            return meeting
+        }
+        return calendar.date(byAdding: .day, value: -1, to: date) ?? date.addingTimeInterval(-86_400)
+    }
+}
+
+/// The last standup update written for a space.
+struct StandupNote: Codable, Hashable {
+    var text: String
+    var at: Date
+    /// The start of the period it covered.
+    var since: Date
+}
+
+/// A task arriving in a board column. Kept so a standup can tell what moved and when; the board
+/// itself only knows where a task is now.
+struct ColumnMove: Codable, Hashable {
+    var column: String
+    var at: Date
 }
 
 struct TimeEntry: Identifiable, Codable, Hashable {
@@ -186,8 +271,19 @@ struct TaskItem: Identifiable, Codable, Hashable {
     /// The goal this task belongs to; a task is in one goal at most, so totals never count twice.
     var goalId: UUID?
     var order: Double = 0
+    /// The latest column changes, oldest first. Only moves made since this was added are known.
+    var moves: [ColumnMove]?
+    static let movesKept = 10
 
     var isRunning: Bool { entries.contains { $0.end == nil } }
+
+    mutating func noteMove(to column: String, at date: Date = Date()) {
+        moves = Array(((moves ?? []) + [ColumnMove(column: column, at: date)]).suffix(Self.movesKept))
+    }
+
+    func moves(in period: DateInterval) -> [ColumnMove] {
+        (moves ?? []).filter { period.contains($0.at) }
+    }
 
     /// How long the running timer has been going since it was last started; 0 when none runs.
     func currentStretch(now: Date) -> TimeInterval {

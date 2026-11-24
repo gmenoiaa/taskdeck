@@ -139,6 +139,7 @@ extension AppStore {
         tasks[i].queueRepoId = nil
         if let target = columns.first(where: { $0.role == .inProgress }) {
             tasks[i].status = target.id
+            tasks[i].noteMove(to: target.id)
             tasks[i].order = (tasks.map(\.order).max() ?? 0) + 1
         }
         save()

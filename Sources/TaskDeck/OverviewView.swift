@@ -35,6 +35,7 @@ struct OverviewView: View {
         let week = calendar.dateInterval(of: .weekOfYear, for: now) ?? today
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
+                standup(now: now)
                 time(now: now, today: today, week: week)
                 if Orca.isInstalled { sessions }
                 goals(week: week, now: now)
@@ -49,6 +50,50 @@ struct OverviewView: View {
         }
         .softScrollEdges()
         .task { await store.refreshSessionStatuses() }
+    }
+
+    // MARK: Standup
+
+    /// The daily standup of the space shown, or one row per space that has one with "All spaces".
+    @ViewBuilder
+    private func standup(now: Date) -> some View {
+        let spaces = store.standupSpaces.filter { spaceId == nil || $0.id == spaceId }
+        if !spaces.isEmpty {
+            section("Daily standup") {
+                ForEach(spaces) { space in
+                    standupRow(space, now: now, preview: spaceId != nil)
+                }
+            }
+        }
+    }
+
+    private func standupRow(_ space: Project, now: Date, preview: Bool) -> some View {
+        let note = store.currentStandup(space, now: now)
+        let meeting = space.standup?.meetingFor(now)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle().fill(space.color).frame(width: 8, height: 8)
+                if spaceId == nil { Text(space.name).lineLimit(1) }
+                if let meeting {
+                    Text("Meeting \(StandupSettings.label(meeting, now: now))")
+                        .foregroundStyle(spaceId == nil ? .secondary : .primary)
+                }
+                if note != nil {
+                    Label("Written", systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green)
+                        .help("An update for this meeting is saved. Open it to copy or write it again.")
+                }
+                Spacer(minLength: 12)
+                Button(note == nil ? "Write update" : "Open update") { store.openStandup = space.id }
+                    .controlSize(.small)
+            }
+            if preview, let note {
+                Text(note.text).font(.callout).foregroundStyle(.secondary).lineLimit(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: Time
