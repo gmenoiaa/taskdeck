@@ -457,6 +457,8 @@ enum Orca {
         var tool: String?
         /// The end of the agent's last answer, once it stopped.
         var lastMessage: String?
+        /// The question or permission the agent is stopped on, when its transcript ends on one.
+        var ask: String?
         var prNumber: Int?
         /// An open pull request that is still marked as a draft.
         var prDraft = false
@@ -475,6 +477,30 @@ enum Orca {
         }
 
         var isAboutPullRequest: Bool { kind == .prOpen || kind == .prMerged || kind == .prClosed }
+
+        /// A few lines saying why the session stopped, for a notification or a list row: what it
+        /// asks for, or else the part of its last answer that says most.
+        var summary: String? {
+            if kind == .yourTurn, let ask { return Self.clip(Self.plain(ask)) }
+            guard let lastMessage, !lastMessage.isEmpty else { return nil }
+            let paragraphs = lastMessage.components(separatedBy: "\n\n").map(Self.plain).filter { !$0.isEmpty }
+            guard let first = paragraphs.first, let end = paragraphs.last else { return nil }
+            // Agents put the conclusion first, except a question, which closes the answer and is
+            // the thing to act on.
+            return Self.clip(end.hasSuffix("?") && paragraphs.count > 1 ? end : first)
+        }
+
+        /// Markdown reads as noise where nothing renders it.
+        private static func plain(_ text: String) -> String {
+            text.replacingOccurrences(of: "(?m)^\\s*(#{1,6}|>|[-*])\\s+", with: "", options: .regularExpression)
+                .replacingOccurrences(of: "\\*\\*|__|`", with: "", options: .regularExpression)
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+        }
+
+        private static func clip(_ text: String) -> String {
+            text.count > 280 ? String(text.prefix(279)) + "…" : text
+        }
 
         var label: String {
             switch kind {

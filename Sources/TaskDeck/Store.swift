@@ -88,6 +88,8 @@ final class AppStore {
     var removingWorktrees: Set<String> = []
     /// Pull requests found by asking GitHub directly, by worktree id, for when Orca reports none.
     @ObservationIgnored private var pullRequests: [String: Orca.PullRequest] = [:]
+    /// What each stopped session's transcript ends on, by worktree id. Read again on every refresh.
+    @ObservationIgnored private var transcripts: [String: SessionTranscript.Last] = [:]
     /// Title, draft flag and dates of the agent sessions' pull requests, by their page. Read for
     /// a standup only; a merged or closed one is not asked about again.
     @ObservationIgnored private var pullRequestDetails: [URL: Orca.PullRequestDetail] = [:]
@@ -851,6 +853,7 @@ final class AppStore {
             orcaReposAt = Date()
         }
         link(trees, spaces: spaces)
+        await readTranscripts(trees)
         publish(trees)
         if await askGitHub(trees, limit: force ? 40 : 3) { publish(trees) }
     }
@@ -883,6 +886,22 @@ final class AppStore {
         if linkedSessions != fresh { linkedSessions = fresh }
     }
 
+    /// Reads what the agent last said from Claude Code's transcript, for the sessions of tasks
+    /// that stopped: Orca knows the answer only of agents its own launcher started.
+    private func readTranscripts(_ trees: [Orca.Worktree]) async {
+        let sessions = tasks.filter { !$0.archived }.flatMap(sessions(of:))
+        let mine = Set(sessions.compactMap(\.worktreeId))
+        let homes = SessionTranscript.homes(Array(Set(sessions.compactMap(\.claudeHome))).sorted())
+        var fresh: [String: SessionTranscript.Last] = [:]
+        for tree in trees where mine.contains(tree.id) && tree.status.kind != .working {
+            // A session waiting for me is read even when Orca has its answer: only the
+            // transcript says what it is waiting for.
+            guard tree.status.kind == .yourTurn || tree.status.lastMessage == nil else { continue }
+            fresh[tree.id] = await SessionTranscript.last(worktree: tree.path, homes: homes)
+        }
+        transcripts = fresh
+    }
+
     /// Turns Orca's answer into the statuses the views read, with GitHub's pull request where Orca has none.
     private func publish(_ trees: [Orca.Worktree]) {
         var fresh: [String: Orca.Status] = [:]
@@ -890,6 +909,12 @@ final class AppStore {
                                uniquingKeysWith: { first, _ in first })
         for tree in trees {
             var status = tree.status
+            if let last = transcripts[tree.id] {
+                // Orca's own answer wins where it has one: it is tied to the agent's terminal,
+                // while the transcript is found by folder.
+                if (status.lastMessage ?? "").isEmpty { status.lastMessage = last.message }
+                if status.kind == .yourTurn { status.ask = last.ask }
+            }
             if status.prNumber == nil, let pr = pullRequests[tree.id] {
                 status.prNumber = pr.number
                 if status.kind == .idle {
