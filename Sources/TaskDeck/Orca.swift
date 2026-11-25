@@ -216,9 +216,10 @@ enum Orca {
         }
     }
 
-    /// Creates an empty folder in `parent` and adds it to Orca. It is a plain folder, not a git
-    /// repository: Orca starts sessions in the folder itself.
-    static func createFolder(named name: String, in parent: String) async throws -> Repo {
+    /// Creates a folder in `parent` and adds it to Orca. With `git` it starts as a git repository
+    /// with one empty commit and no remote, so Orca gives each session its own checkout and branch.
+    /// Without, it is a plain folder and Orca starts sessions in the folder itself.
+    static func createFolder(named name: String, in parent: String, git: Bool = false) async throws -> Repo {
         let path = try newDirectoryPath(named: name, in: parent)
         do {
             try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
@@ -226,12 +227,30 @@ enum Orca {
             throw Failure.failed("The folder could not be created: \(error.localizedDescription)")
         }
         do {
+            if git { try await initRepository(at: path) }
             return try await add(path: path)
         } catch {
-            // Nothing is left behind, so trying again does not find the name taken. `rmdir` only
-            // ever removes an empty folder.
+            // Nothing is left behind, so trying again does not find the name taken. Only what was
+            // made here goes: the repository's own folder, then the folder if that leaves it empty.
+            if git { try? FileManager.default.removeItem(atPath: (path as NSString).appendingPathComponent(".git")) }
             rmdir(path)
             throw error
+        }
+    }
+
+    /// `git init` and a first, empty commit. Without a commit there is no branch for Orca to
+    /// base a worktree on.
+    private static func initRepository(at path: String) async throws {
+        guard let git = ["/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"]
+            .first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw Failure.failed("The git command was not found.")
+        }
+        for args in [["init"], ["commit", "--allow-empty", "-m", "Initial commit"]] {
+            let reply = try await exec(git, ["-C", path] + args)
+            guard reply.status == 0 else {
+                throw Failure.failed("git \(args[0]) failed: "
+                    + message(reply: nil, status: reply.status, out: reply.out, err: reply.err))
+            }
         }
     }
 

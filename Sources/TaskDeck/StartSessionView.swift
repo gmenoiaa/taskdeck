@@ -15,6 +15,8 @@ struct StartSessionView: View {
     /// What to clone, as typed: "owner/name" or a github.com address.
     @State private var cloneSource = ""
     @State private var folderName = ""
+    /// Whether the new folder starts as a git repository. Remembered between sessions.
+    @AppStorage("newFolderGit") private var folderGit = true
     /// Where the clone or the new folder goes, as typed. Suggested from where the repositories are.
     @State private var parent = ""
     /// What `start` is doing, shown beside the spinner.
@@ -114,7 +116,9 @@ struct StartSessionView: View {
                     }
                 } else if repoId == Self.folder {
                     TextField("Folder name", text: $folderName)
-                        .help("An empty folder is created and added to Orca. It is a plain folder, not a git repository.")
+                        .help("An empty folder is created and added to Orca.")
+                    Toggle("Start a git repository in it", isOn: $folderGit)
+                        .help("On: git init with one empty commit and no remote, so each session gets its own checkout and branch. Add a remote later with “git remote add”. Off: a plain folder, and sessions work in the folder itself.")
                 }
                 if repoId == Self.clone || repoId == Self.folder {
                     LabeledContent(repoId == Self.clone ? "Clone into" : "Create in") {
@@ -220,7 +224,7 @@ struct StartSessionView: View {
                 adopt(repo)
             } else if repoId == Self.folder {
                 progress = "Creating the folder…"
-                repo = try await Orca.createFolder(named: folderName, in: parent)
+                repo = try await Orca.createFolder(named: folderName, in: parent, git: folderGit)
                 adopt(repo)
             } else {
                 return
