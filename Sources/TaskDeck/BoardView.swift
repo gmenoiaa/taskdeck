@@ -560,7 +560,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             PendingTimeView().environment(store)
         }
         .sheet(isPresented: $showImport) {
-            ImportView().environment(store)
+            ImportView(space: filter, store: store).environment(store)
         }
         .sheet(item: $standup) { target in
             StandupView(spaceId: target.id).environment(store)

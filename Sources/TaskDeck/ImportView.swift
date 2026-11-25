@@ -6,6 +6,14 @@ struct ImportView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var filter: UUID?
+
+    /// Opens on the space the main window shows, so its filter carries over; the picker can
+    /// still widen it. A space with no tracker has nothing to list, and falls back to all.
+    init(space: UUID? = nil, store: AppStore? = nil) {
+        let listed = store?.project(space).map { $0.kind != .other } ?? false
+        _filter = State(initialValue: listed ? space : nil)
+    }
+
     @State private var search = ""
     @State private var selected: Set<String> = []
     /// Spaces whose "Ignored" list is open.
