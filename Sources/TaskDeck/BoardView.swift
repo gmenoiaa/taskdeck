@@ -363,7 +363,9 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         @Bindable var store = store
         Group {
             if tab == "overview" {
-                OverviewView(spaceId: filter, onDetails: { details = $0 }, onGoal: openGoal)
+                OverviewView(spaceId: filter, onDetails: { details = $0 }, onGoal: openGoal,
+                             onLog: { logging = $0 }, onLogAll: { showPending = true },
+                             onBoard: { tab = "board" })
             } else if tab == "goals" {
                 GoalsView(spaceId: filter, selection: $goalSelected, onOpen: openCard, onNewTask: { newTask(goal: $0) },
                           onShowOnBoard: showGoalOnBoard)
@@ -558,7 +560,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             PendingTimeView().environment(store)
         }
         .sheet(isPresented: $showImport) {
-            ImportView().environment(store)
+            ImportView(space: filter, store: store).environment(store)
         }
         .sheet(item: $standup) { target in
             StandupView(spaceId: target.id).environment(store)

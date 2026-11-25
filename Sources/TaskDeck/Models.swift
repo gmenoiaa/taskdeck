@@ -119,6 +119,8 @@ struct Project: Identifiable, Codable, Hashable {
     var createType: String?
     /// The space's daily standup; nil for a space that has none set up.
     var standup: StandupSettings?
+    /// Hours aimed at per working day (Monday to Friday) in this space; nil for no target.
+    var dailyTargetHours: Double?
     /// How much of this space the review may send to Claude: a `ReviewDetail`. Nil is status only.
     var reviewDetail: String?
 

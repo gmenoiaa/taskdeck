@@ -64,6 +64,9 @@ final class AppStore {
     /// A space whose standup sheet should open in the main window: set by the menu bar, a command
     /// or a notification, and cleared by the window once it shows the sheet. Not saved.
     var openStandup: UUID?
+    /// The overview's widgets in the user's order; empty means the default. Read it through
+    /// `overviewPlacements`, which fills in widgets the file does not mention.
+    var overviewLayout: [OverviewSlot] = []
     /// Since when the user has been at the Mac in one go; nil while away or idle. Not saved.
     var activeSince: Date? = Date()
     @ObservationIgnored var noTimerRemindedAt: Date?
@@ -133,6 +136,7 @@ final class AppStore {
         var reviewModel: String?
         var reviewWhenSessionStops: Bool?
         var reviewDismissed: [String: String]?
+        var overviewLayout: [OverviewSlot]?
     }
 
     static var dataURL: URL {
@@ -356,6 +360,7 @@ final class AppStore {
             reviewModel = snap.reviewModel ?? ClaudeCode.defaultModel
             reviewWhenSessionStops = snap.reviewWhenSessionStops ?? false
             reviewDismissed = snap.reviewDismissed ?? [:]
+            overviewLayout = snap.overviewLayout ?? []
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -384,7 +389,8 @@ final class AppStore {
                             standupRemindedAt: standupRemindedAt.isEmpty ? nil : Self.byString(standupRemindedAt),
                             review: review, reviewHome: reviewHome.isEmpty ? nil : reviewHome,
                             reviewModel: reviewModel, reviewWhenSessionStops: reviewWhenSessionStops,
-                            reviewDismissed: reviewDismissed.isEmpty ? nil : reviewDismissed)
+                            reviewDismissed: reviewDismissed.isEmpty ? nil : reviewDismissed,
+                            overviewLayout: overviewLayout.isEmpty ? nil : overviewLayout)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }

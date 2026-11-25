@@ -27,7 +27,17 @@ struct ReviewSection: View {
             }
             if let review = store.review {
                 if !review.summary.isEmpty, spaceId == nil {
-                    Text(review.summary).fixedSize(horizontal: false, vertical: true)
+                    // The same red box and sparkles as the ticket's "In simple words": both are
+                    // Claude's words, and should be told apart from the app's own at a glance.
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: "sparkles").foregroundStyle(Theme.accent)
+                        Text(review.summary).fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: Radius.card, style: .continuous).strokeBorder(Theme.accent.opacity(0.25)))
                 }
                 if items.isEmpty {
                     Text(spaceId == nil ? "Nothing needs you right now." : "Nothing in this space needs you right now.")

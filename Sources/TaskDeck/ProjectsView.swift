@@ -126,6 +126,12 @@ struct ProjectEditor: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
+                Section("Daily target") {
+                    TextField("Hours per working day", value: $project.dailyTargetHours,
+                              format: .number.precision(.fractionLength(0...2)), prompt: Text("None"))
+                    Text("Counts Monday to Friday. The overview draws it on the chart and shows what is left. Empty for no target.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 StandupSection(settings: Binding(get: { project.standup ?? StandupSettings() },
                                                  set: { project.standup = $0 }))
                 if Browser.kinds.contains(where: \.isInstalled) {
@@ -198,6 +204,7 @@ struct ProjectEditor: View {
                     project.claudeHome = home.isEmpty ? nil : home
                     let prompt = (project.sessionPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     project.sessionPrompt = prompt.isEmpty ? nil : prompt
+                    if let hours = project.dailyTargetHours, hours <= 0 { project.dailyTargetHours = nil }
                     if var standup = project.standup {
                         standup.instructions = standup.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
                         // Never set up: nothing worth keeping in the file. Turned off after a setup:
