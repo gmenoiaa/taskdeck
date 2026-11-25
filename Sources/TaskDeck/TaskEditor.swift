@@ -20,10 +20,12 @@ struct TaskEditor: View {
     @State private var description: String
     @State private var sendingToTracker = false
 
-    init(task: TaskItem) {
+    /// `ticket` is a link pasted on the board for a new task: it goes in the ticket field as if
+    /// typed, so the reference, the link and the title are worked out from it.
+    init(task: TaskItem, ticket: String? = nil) {
         original = task
         _task = State(initialValue: task)
-        _ticket = State(initialValue: task.ref)
+        _ticket = State(initialValue: ticket ?? task.ref)
         // A blank new task starts on "existing", the common case; a task saved without a ticket
         // was a new one.
         _existingTicket = State(initialValue: !task.ref.isEmpty || (task.title.isEmpty && task.draft == nil))

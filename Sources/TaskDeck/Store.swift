@@ -18,6 +18,9 @@ final class AppStore {
     /// The agent queue: how many of its sessions may work at once, whether they run without stopping
     /// for permission, and whether Claude is asked which repository a ticket is about.
     var agentQueueLimit = 2
+    /// The first message of a code review session, for spaces without their own. Empty means
+    /// `CodeReview.standardPrompt`.
+    var codeReviewPrompt = ""
     var agentQueueSkipPermissions = true
     var agentQueueAskClaude = false
     @ObservationIgnored var processingQueue = false
@@ -64,6 +67,16 @@ final class AppStore {
     /// A space whose standup sheet should open in the main window: set by the menu bar, a command
     /// or a notification, and cleared by the window once it shows the sheet. Not saved.
     var openStandup: UUID?
+    /// A pull request's link dropped on the board, for the board to open the review sheet with. Not saved.
+    var droppedPullRequest: String?
+
+    /// Takes a dropped text when it is a pull request's link. Cards are dragged as text too, so
+    /// the board's drop targets ask this first.
+    func takeDrop(_ text: String) -> Bool {
+        guard Orca.isInstalled, CodeReview.pullRequest(text) != nil else { return false }
+        droppedPullRequest = text
+        return true
+    }
     /// The overview's widgets in the user's order; empty means the default. Read it through
     /// `overviewPlacements`, which fills in widgets the file does not mention.
     var overviewLayout: [OverviewSlot] = []
@@ -137,6 +150,7 @@ final class AppStore {
         var reviewWhenSessionStops: Bool?
         var reviewDismissed: [String: String]?
         var overviewLayout: [OverviewSlot]?
+        var codeReviewPrompt: String?
     }
 
     static var dataURL: URL {
@@ -361,6 +375,7 @@ final class AppStore {
             reviewWhenSessionStops = snap.reviewWhenSessionStops ?? false
             reviewDismissed = snap.reviewDismissed ?? [:]
             overviewLayout = snap.overviewLayout ?? []
+            codeReviewPrompt = snap.codeReviewPrompt ?? ""
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -390,7 +405,8 @@ final class AppStore {
                             review: review, reviewHome: reviewHome.isEmpty ? nil : reviewHome,
                             reviewModel: reviewModel, reviewWhenSessionStops: reviewWhenSessionStops,
                             reviewDismissed: reviewDismissed.isEmpty ? nil : reviewDismissed,
-                            overviewLayout: overviewLayout.isEmpty ? nil : overviewLayout)
+                            overviewLayout: overviewLayout.isEmpty ? nil : overviewLayout,
+                            codeReviewPrompt: codeReviewPrompt.isEmpty ? nil : codeReviewPrompt)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
@@ -815,11 +831,13 @@ final class AppStore {
 
     /// Records a session that Orca just started, and remembers the repository for the task's project.
     /// `claudeHome` is remembered too when the session ran Claude (nil leaves the project's value alone).
+    /// `remember` is false for a code review: somebody else's repository, reviewed once, should not
+    /// become the space's own or the one preselected for its next session.
     func addSession(_ session: AgentSession, to id: UUID, repoId: String, claudeHome: String? = nil,
-                    githubAccount: String) {
+                    githubAccount: String, remember: Bool = true) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].sessions = (tasks[i].sessions ?? []) + [session]
-        if let p = projects.firstIndex(where: { $0.id == tasks[i].projectId }) {
+        if remember, let p = projects.firstIndex(where: { $0.id == tasks[i].projectId }) {
             projects[p].orcaRepoId = repoId
             // A repository used for a space's task belongs to that space from then on.
             if !projects[p].repoIds.contains(repoId) { projects[p].orcaRepoIds = projects[p].repoIds + [repoId] }

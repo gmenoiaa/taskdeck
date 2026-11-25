@@ -28,6 +28,11 @@ struct BoardView: View {
     @State private var selected: UUID?
     @State private var deleting: TaskItem?
     @State private var startingSession: TaskItem?
+    @State private var reviewingPullRequest = false
+    /// The link the review sheet opens with, when it was pasted or dropped on the board.
+    @State private var reviewLink: String?
+    /// A ticket's link pasted on the board, with the new task it is for.
+    @State private var pastedTicket: (task: UUID, link: String)?
     @State private var standup: StandupTarget?
 
     /// Every word typed has to appear somewhere in the task, in any order, ignoring case and accents.
@@ -189,6 +194,12 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             selected = first.id
             return true
         }
+        // ⌘V with a link copied: a pull request's starts its review, a ticket's a new task. Any
+        // other paste means nothing here.
+        if flags == .command, event.charactersIgnoringModifiers?.lowercased() == "v",
+           let copied = NSPasteboard.general.string(forType: .string) {
+            return paste(copied.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
         var lane = 0, row = 0, current: TaskItem?
         for (l, entry) in lanes.enumerated() {
             if let r = entry.tasks.firstIndex(where: { $0.id == selected }) { lane = l; row = r; current = entry.tasks[r] }
@@ -265,6 +276,48 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         focusToolbarSearch(placeholder: "Search tasks")
     }
 
+    private func paste(_ link: String) -> Bool {
+        if Orca.isInstalled, CodeReview.pullRequest(link) != nil {
+            reviewPullRequest(link)
+            return true
+        }
+        guard let space = ticketSpace(of: link) else { return false }
+        // Already on the board: show the card instead of making a second one.
+        let ref = LinkResolver.resolve(link, kind: space.kind, base: space.baseURL).ref
+        if let known = store.tasks.first(where: { $0.projectId == space.id && !$0.archived && ($0.url == link || $0.ref == ref) }) {
+            selected = known.id
+            return true
+        }
+        var task = TaskItem(projectId: space.id, status: store.defaultColumnId)
+        task.goalId = goalFilter
+        pastedTicket = (task.id, link)
+        editing = task
+        return true
+    }
+
+    /// The space whose tracker a link points into, by the tracker's address. Nil when it is not a
+    /// link or no space's tracker lives there.
+    private func ticketSpace(of link: String) -> Project? {
+        guard link.lowercased().hasPrefix("http"), !link.contains(where: \.isWhitespace),
+              let host = URLComponents(string: link)?.host?.lowercased() else { return nil }
+        let spaces = store.projects.filter { space in
+            guard space.kind != .other else { return false }
+            let base = URLComponents(string: space.baseURL.trimmingCharacters(in: .whitespaces))?.host?.lowercased()
+            return base == host || (base == nil && space.kind == .github && host == "github.com")
+        }
+        // Several spaces can share a host (github.com): the one whose address the link starts
+        // with, then the one the board shows.
+        return spaces.first { !$0.baseURL.isEmpty && link.lowercased().hasPrefix($0.baseURL.trimmingCharacters(in: .whitespaces).lowercased()) }
+            ?? spaces.first { $0.id == filter }
+            ?? spaces.first
+    }
+
+    /// Opens the review sheet. Without a link the sheet looks at the clipboard itself.
+    private func reviewPullRequest(_ link: String? = nil) {
+        reviewLink = link
+        reviewingPullRequest = true
+    }
+
     private func newTask() {
         newTask(goal: tab == "goals" ? UUID(uuidString: goalSelected).flatMap { store.goal($0)?.id } : nil)
     }
@@ -336,7 +389,10 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         if #available(macOS 26.0, *) {
             ToolbarSpacer(.fixed, placement: .primaryAction)
             ToolbarItem(placement: .primaryAction) {
-                Button(action: newTask) {
+                // A click makes a task; holding the button down shows the other ways to start work.
+                Menu {
+                    newTaskMenu
+                } label: {
                     // Drawn by hand: a tinted button style in the toolbar comes out oversized and not round.
                     Image(systemName: "plus")
                         .font(.system(size: 15, weight: .semibold))
@@ -344,19 +400,36 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
                         .frame(width: 36, height: 36)
                         .glassEffect(.regular.tint(Theme.accent).interactive(), in: .circle)
                         .contentShape(Circle())
+                } primaryAction: {
+                    newTask()
                 }
+                .menuStyle(.button)
                 .buttonStyle(.plain)
+                .menuIndicator(.hidden)
                 .accessibilityLabel("New task")
-                .help("New task (⌘N)")
+                .help("New task (⌘N). Hold for more.")
             }
             .sharedBackgroundVisibility(.hidden)
         } else {
             ToolbarItem(placement: .primaryAction) {
-                Button(action: newTask) { Label("New task", systemImage: "plus") }
-                    .help("New task (⌘N)")
-                    .buttonStyle(.borderedProminent).tint(Theme.accent)
+                Menu {
+                    newTaskMenu
+                } label: {
+                    Label("New task", systemImage: "plus")
+                } primaryAction: {
+                    newTask()
+                }
+                .help("New task (⌘N). Hold for more.")
+                .buttonStyle(.borderedProminent).tint(Theme.accent)
             }
         }
+    }
+
+    @ViewBuilder
+    private var newTaskMenu: some View {
+        Button("New Task") { newTask() }
+        Button("Review a Pull Request…") { reviewPullRequest() }
+            .disabled(!Orca.isInstalled)
     }
 
         var body: some View {
@@ -429,6 +502,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         .focusedSceneValue(\.board, BoardActions(
             newTask: newTask,
             fetchAssigned: { showImport = true },
+            reviewPullRequest: { reviewPullRequest() },
             logPending: pendingSeconds > 0 ? { showPending = true } : nil,
             showArchive: { showArchive = true },
             search: focusSearch,
@@ -545,7 +619,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         }
         .onChange(of: store.singleTimer) { store.save() }
         .sheet(item: $editing) { task in
-            TaskEditor(task: task).environment(store)
+            TaskEditor(task: task, ticket: pastedTicket?.task == task.id ? pastedTicket?.link : nil).environment(store)
         }
         .sheet(item: $logging) { task in
             LogTimeView(taskId: task.id).environment(store)
@@ -561,6 +635,14 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         }
         .sheet(isPresented: $showImport) {
             ImportView(space: filter, store: store).environment(store)
+        }
+        .sheet(isPresented: $reviewingPullRequest) {
+            CodeReviewView(space: filter, link: reviewLink).environment(store)
+        }
+        .onChange(of: store.droppedPullRequest) { _, link in
+            guard let link else { return }
+            store.droppedPullRequest = nil
+            reviewPullRequest(link)
         }
         .sheet(item: $standup) { target in
             StandupView(spaceId: target.id).environment(store)
@@ -788,6 +870,7 @@ struct KeyCatcher: NSViewRepresentable {
 struct BoardActions {
     var newTask: () -> Void
     var fetchAssigned: () -> Void
+    var reviewPullRequest: () -> Void
     /// Nil when there is no time waiting to be logged.
     var logPending: (() -> Void)?
     var showArchive: () -> Void
@@ -827,6 +910,9 @@ struct AppCommands: Commands {
             Button("Fetch Tickets Assigned to Me…") { board?.fetchAssigned() }
                 .keyboardShortcut("i", modifiers: .command)
                 .disabled(board == nil)
+            Button("Review a Pull Request…") { board?.reviewPullRequest() }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(board == nil || !Orca.isInstalled)
             Button("Log Pending Time…") { board?.logPending?() }
                 .keyboardShortcut("l", modifiers: .command)
                 .disabled(board?.logPending == nil)
@@ -1057,7 +1143,9 @@ struct ColumnView: View {
                                 }
                             }
                             .dropDestination(for: String.self) { items, _ in
-                                guard let raw = items.first, let id = UUID(uuidString: raw) else { return false }
+                                guard let raw = items.first else { return false }
+                                if store.takeDrop(raw) { return true }
+                                guard let id = UUID(uuidString: raw) else { return false }
                                 store.place(id, before: task.id, in: column.id)
                                 return true
                             } isTargeted: { over in
@@ -1072,7 +1160,9 @@ struct ColumnView: View {
                             if dropAtEnd { Capsule().fill(Theme.accent).frame(height: 3).offset(y: -5.5) }
                         }
                         .dropDestination(for: String.self) { items, _ in
-                            guard let raw = items.first, let id = UUID(uuidString: raw) else { return false }
+                            guard let raw = items.first else { return false }
+                                if store.takeDrop(raw) { return true }
+                                guard let id = UUID(uuidString: raw) else { return false }
                             store.place(id, before: nil, in: column.id)
                             return true
                         } isTargeted: { dropAtEnd = $0 }
@@ -1113,7 +1203,9 @@ struct ColumnView: View {
                 .strokeBorder(Theme.accent.opacity(targeted ? 0.8 : 0), lineWidth: 2)
         )
         .dropDestination(for: String.self) { items, _ in
-            guard let raw = items.first, let id = UUID(uuidString: raw) else { return false }
+            guard let raw = items.first else { return false }
+                                if store.takeDrop(raw) { return true }
+                                guard let id = UUID(uuidString: raw) else { return false }
             store.move(id, to: column.id)
             return true
         } isTargeted: { targeted = $0 }

@@ -295,6 +295,14 @@ private struct AgentSettings: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            Section("Code review sessions") {
+                TextEditor(text: $store.codeReviewPrompt)
+                    .font(.callout.monospaced())
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 90, maxHeight: 200)
+                Text("The first message of a session started with Tasks, Review a Pull Request. Leave empty for the standard one, which starts with “\(CodeReview.standardCommand)”. " + CodeReview.placeholderHelp + " A space can have its own (Edit space).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Review") {
                 if !ClaudeCode.isInstalled {
                     Text("The review asks Claude through Claude Code, which was not found on this Mac. Without it the review lists only what the app's own rules find.")
@@ -322,6 +330,7 @@ private struct AgentSettings: View {
         .onChange(of: store.reviewModel) { store.save() }
         .onChange(of: store.reviewWhenSessionStops) { store.save() }
         .onChange(of: store.agentQueueLimit) { store.save() }
+        .onChange(of: store.codeReviewPrompt) { store.save() }
         .onChange(of: store.agentQueueSkipPermissions) { store.save() }
         .onChange(of: store.agentQueueAskClaude) { store.save() }
     }

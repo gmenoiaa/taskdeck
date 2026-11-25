@@ -105,6 +105,9 @@ struct Project: Identifiable, Codable, Hashable {
     /// The first message for this space's agent sessions, with placeholders such as "{ref}" (see
     /// `Orca.placeholders`). Empty or nil means the app's standard message.
     var sessionPrompt: String?
+    /// The first message for a code review session started in this space (see
+    /// `CodeReview.placeholders`). Empty or nil means the app's own, from Settings.
+    var codeReviewPrompt: String?
     /// The browser this space's links open in ("chrome", "edge"); nil for the system default.
     var browser: String?
     /// The browser profile's folder ("Default", "Profile 1"); nil for the browser's last used profile.

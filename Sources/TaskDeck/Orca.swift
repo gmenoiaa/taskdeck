@@ -126,9 +126,10 @@ enum Orca {
     /// Creates a new checkout of the repository, starts the agent in it and sends the prompt.
     /// `claudeHome` (Claude only) is the directory Claude Code keeps its settings, MCP servers and logs in.
     /// `githubAccount` is the `gh` user the agent's `gh` commands run as; empty means gh's active account.
+    /// `baseBranch` is the ref the checkout starts from; nil for the repository's default.
     static func start(repo: Repo, name: String, agent: String, prompt: String, comment: String,
                       claudeHome: String? = nil, githubAccount: String? = nil,
-                      skipPermissions: Bool = false) async throws -> AgentSession {
+                      skipPermissions: Bool = false, baseBranch: String? = nil) async throws -> AgentSession {
         let home = agent == "claude" ? (claudeHome?.trimmingCharacters(in: .whitespaces) ?? "") : ""
         let account = githubAccount?.trimmingCharacters(in: .whitespaces) ?? ""
         // Orca's launcher takes no flags either, so a session that must not stop to ask is typed too.
@@ -140,6 +141,7 @@ enum Orca {
         // worktree is created without an agent and the agent is started in a terminal below.
         if !customLaunch { args += ["--agent", agent, "--prompt", prompt] }
         if !comment.isEmpty { args += ["--comment", comment] }
+        if let baseBranch { args += ["--base-branch", baseBranch] }
         let result = try await run(args)
         // The shape of this result differs between Orca versions, so each value is looked up by key
         // wherever it sits rather than at a fixed path.
@@ -326,6 +328,32 @@ enum Orca {
         // Without a token nothing is asked: gh would silently answer as the active account.
         let script = "T=\"$(\"$0\" auth token --user \"$1\")\"; [ -n \"$T\" ] || exit 9; shift; GH_TOKEN=\"$T\" exec \"$0\" \"$@\""
         return try? await exec("/bin/sh", ["-c", script, gh, account] + args, timeout: timeout)
+    }
+
+    /// Fetches a pull request's head into the repository, so a worktree can start from the code
+    /// under review. Returns the ref to base the worktree on. The ref is a remote-tracking one of
+    /// its own, so no local branch is made or moved.
+    static func fetchPullRequest(_ number: Int, in repo: Repo, account: String?) async throws -> String {
+        let git = "/usr/bin/git"
+        let args = ["-C", repo.path, "fetch", "origin", "+refs/pull/\(number)/head:refs/remotes/origin/pr/\(number)"]
+        // Never a password prompt: there is no terminal to answer it, and the fetch would hang.
+        let quiet = ["GIT_TERMINAL_PROMPT": "0"]
+        let reply: Shell.Result
+        if let account, !account.isEmpty, let gh = ghExecutable {
+            // As in `runGH`: the token goes from gh's keyring to git inside the shell. It only
+            // counts when git asks gh for credentials (gh auth setup-git); an ssh remote ignores it.
+            let script = "T=\"$(\"$0\" auth token --user \"$1\")\"; [ -n \"$T\" ] || exit 9; shift; GH_TOKEN=\"$T\" exec \(git) \"$@\""
+            reply = try await Shell.run("/bin/sh", ["-c", script, gh, account] + args, environment: quiet, timeout: 600)
+            if reply.status == 9 {
+                throw Failure.failed("gh has no token for \(account). Run “gh auth login” in a terminal.")
+            }
+        } else {
+            reply = try await Shell.run(git, args, environment: quiet, timeout: 600)
+        }
+        guard reply.status == 0 else {
+            throw Failure.failed(message(reply: nil, status: reply.status, out: reply.out, err: reply.err))
+        }
+        return "origin/pr/\(number)"
     }
 
     /// A pull request's title, draft flag and dates, for the standup. Orca and the branch lookup
