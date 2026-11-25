@@ -191,6 +191,13 @@ struct ProjectEditor: View {
                              + ". You can still edit the message each time you start a session.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    Section("First message of a code review") {
+                        TextEditor(text: Binding(get: { project.codeReviewPrompt ?? "" }, set: { project.codeReviewPrompt = $0 }))
+                            .font(.callout.monospaced())
+                            .frame(minHeight: 70)
+                        Text("Leave empty for the one in Settings, Agents. It is used when a pull request is reviewed in this space (Tasks, Review a Pull Request). " + CodeReview.placeholderHelp)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -204,6 +211,8 @@ struct ProjectEditor: View {
                     project.claudeHome = home.isEmpty ? nil : home
                     let prompt = (project.sessionPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                     project.sessionPrompt = prompt.isEmpty ? nil : prompt
+                    let review = (project.codeReviewPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    project.codeReviewPrompt = review.isEmpty ? nil : review
                     if let hours = project.dailyTargetHours, hours <= 0 { project.dailyTargetHours = nil }
                     if var standup = project.standup {
                         standup.instructions = standup.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
