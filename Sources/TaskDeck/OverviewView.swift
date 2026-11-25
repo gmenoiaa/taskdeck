@@ -9,6 +9,11 @@ struct OverviewView: View {
     let onDetails: (TaskItem) -> Void
     /// Opens a goal in the Goals tab.
     var onGoal: (UUID) -> Void = { _ in }
+    /// Opens the sheet that logs one task's time, and the one that logs everything pending.
+    var onLog: (TaskItem) -> Void = { _ in }
+    var onLogAll: () -> Void = {}
+    /// Shows the board.
+    var onBoard: () -> Void = {}
 
     private var tasks: [TaskItem] { store.tasks.filter { spaceId == nil || $0.projectId == spaceId } }
 
@@ -106,6 +111,8 @@ struct OverviewView: View {
             }
         case .sessions: sessions
         case .goals: goals(span: moment.span, now: moment.now)
+        case .due: due(now: moment.now)
+        case .unlogged: unlogged
         case .bySpace:
             if spaceId == nil {
                 bySpace(moment)
@@ -427,13 +434,10 @@ struct OverviewView: View {
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                     Spacer(minLength: 8)
-                    SessionBadge(status: row.status, count: 1)
-                    if let pr = row.status.prURL {
-                        Button("Open PR") { Browser.open(pr, space: store.project(row.task.projectId)) }
-                            .controlSize(.small)
-                    }
-                    Button("Open in Orca") { Task { await Orca.reveal(row.session) } }
-                        .controlSize(.small)
+                    // The same pills as on a board card, and like there they are the links: the pull
+                    // request's opens it, the session's opens it in Orca.
+                    SessionBadges(session: row.session, status: row.status,
+                                  space: store.project(row.task.projectId), count: 1)
                 }
                 .padding(.horizontal, 10).padding(.vertical, 7)
                 .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
@@ -536,13 +540,76 @@ struct OverviewView: View {
             HStack(spacing: 8) {
                 ForEach(store.columns) { column in
                     let count = store.tasks(in: column.id, project: spaceId).count
-                    HStack(spacing: 5) {
-                        Text(column.displayName).foregroundStyle(.secondary)
-                        Text("\(count)").fontWeight(.semibold).monospacedDigit()
+                    Button(action: onBoard) {
+                        HStack(spacing: 5) {
+                            Text(column.displayName).foregroundStyle(.secondary)
+                            Text("\(count)").fontWeight(.semibold).monospacedDigit()
+                        }
+                        .font(.callout)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.05), in: Capsule())
+                        .contentShape(Capsule())
                     }
-                    .font(.callout)
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Color.primary.opacity(0.05), in: Capsule())
+                    .buttonStyle(.plain)
+                    .help("Show the board")
+                }
+            }
+        }
+    }
+
+    // MARK: Due and to log
+
+    /// Open tasks and active goals that are overdue or due within a week, soonest first.
+    @ViewBuilder
+    private func due(now: Date) -> some View {
+        let soon: (Date) -> Bool = { Due.daysLeft($0, now: now) <= 7 }
+        let dueTasks = tasks.filter { !store.isDone($0) }
+            .compactMap { task in task.due.map { (date: $0, task: Optional(task), goal: Goal?.none) } }
+        let dueGoals = store.goals(in: spaceId).filter { $0.status == .active }
+            .compactMap { goal in goal.due.map { (date: $0, task: TaskItem?.none, goal: Optional(goal)) } }
+        let rows = (dueTasks + dueGoals).filter { soon($0.date) }.sorted { $0.date < $1.date }
+        if !rows.isEmpty {
+            section(.due) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 8) {
+                        if let task = row.task {
+                            Circle().fill(store.project(task.projectId)?.color ?? .gray).frame(width: 8, height: 8)
+                            taskButton(task)
+                        } else if let goal = row.goal {
+                            Image(systemName: "target").font(.caption).foregroundStyle(.secondary).frame(width: 8)
+                            Button { onGoal(goal.id) } label: {
+                                Text(goal.displayName).lineLimit(1).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open the goal")
+                        }
+                        Spacer(minLength: 16)
+                        DueChip(date: row.date)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tasks behind the orange tile: stopped time that can be sent to Redmine, most first.
+    @ViewBuilder
+    private var unlogged: some View {
+        let rows = store.pendingLogTasks.filter { (spaceId == nil || $0.projectId == spaceId) && $0.unloggedSeconds >= 60 }
+        if !rows.isEmpty {
+            section(.unlogged) {
+                ForEach(rows.prefix(6)) { task in
+                    HStack(spacing: 8) {
+                        Circle().fill(store.project(task.projectId)?.color ?? .gray).frame(width: 8, height: 8)
+                        taskButton(task)
+                        Spacer(minLength: 16)
+                        Text(Fmt.short(task.unloggedSeconds)).monospacedDigit().foregroundStyle(.orange)
+                        Button("Log time") { onLog(task) }.controlSize(.small)
+                    }
+                }
+                HStack(spacing: 8) {
+                    if rows.count > 6 { Text("and \(rows.count - 6) more").foregroundStyle(.secondary) }
+                    Button("Log all…", action: onLogAll).controlSize(.small)
+                        .help("Review everything pending and send it in one go")
                 }
             }
         }

@@ -2,7 +2,7 @@ import Foundation
 
 /// A section of the overview. The user orders and hides them; see `AppStore.overviewPlacements`.
 enum OverviewWidget: String, CaseIterable, Identifiable {
-    case standup, time, chart, calendar, breakdown, sessions, goals, bySpace, topTasks, board
+    case standup, time, chart, calendar, breakdown, sessions, goals, due, unlogged, bySpace, topTasks, board
 
     var id: String { rawValue }
 
@@ -16,6 +16,8 @@ enum OverviewWidget: String, CaseIterable, Identifiable {
         case .breakdown: "Where the time went"
         case .sessions: "Agent sessions"
         case .goals: "Goals"
+        case .due: "Due soon"
+        case .unlogged: "Time to log"
         case .bySpace: "By space"
         case .topTasks: "Most time"
         case .board: "On the board"
@@ -25,7 +27,8 @@ enum OverviewWidget: String, CaseIterable, Identifiable {
     /// Hidden until the user asks for it. The two lists say what the chart and "Where the time
     /// went" already say; they stay for whoever prefers them. A layout the user arranged keeps
     /// what it had.
-    var hiddenByDefault: Bool { self == .bySpace || self == .topTasks }
+    /// "Time to log" repeats the toolbar's time-to-push button, for whoever wants the list in view.
+    var hiddenByDefault: Bool { self == .bySpace || self == .topTasks || self == .unlogged }
 
     /// What a widget being dragged carries. Prefixed so a task card dropped on the overview, which
     /// carries a bare UUID string, is never taken for a widget.

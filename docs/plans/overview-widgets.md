@@ -168,6 +168,10 @@ Aggregation (`Store.swift`)
 
 ## Phase 4 — More widgets (each small, each optional)
 
+**Done**: `due` (shown by default), `unlogged` (hidden by default, it repeats the toolbar's
+time-to-push button) and the clickable board pills. The board shows every column at once, so a
+pill opens the board rather than one column. Half-width widgets are not done.
+
 - `due`: tasks and goals due in the next 7 days and overdue ones, soonest first, using `Due`.
 - `unlogged`: the tasks behind the orange tile, with a **Log time** button per row that opens
   the existing log sheet.
