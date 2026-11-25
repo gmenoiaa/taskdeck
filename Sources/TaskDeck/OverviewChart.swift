@@ -127,51 +127,88 @@ struct OverviewChart: View {
 
     // MARK: One day
 
+    /// A task's stretches on the day, as fractions of it.
     private struct Row: Identifiable {
         let id: UUID
         let label: String
-        let start: Date
-        let end: Date
         let color: Color
+        var spans: [(from: Double, to: Double)]
+        var seconds: TimeInterval
     }
 
+    private func rows(_ interval: DateInterval) -> [Row] {
+        var rows: [Row] = []
+        // Earliest first, so the rows read down the day.
+        for stretch in store.stretches(in: interval, project: spaceId, now: now) {
+            let span = (from: stretch.start.timeIntervalSince(interval.start) / interval.duration,
+                        to: stretch.end.timeIntervalSince(interval.start) / interval.duration)
+            let seconds = stretch.end.timeIntervalSince(stretch.start)
+            if let index = rows.firstIndex(where: { $0.id == stretch.task.id }) {
+                rows[index].spans.append(span)
+                rows[index].seconds += seconds
+            } else {
+                rows.append(Row(id: stretch.task.id,
+                                label: "\(stretch.task.displayRef) \(stretch.task.title)".trimmingCharacters(in: .whitespaces),
+                                color: store.project(stretch.task.projectId)?.color ?? .gray,
+                                spans: [span], seconds: seconds))
+            }
+        }
+        return rows
+    }
+
+    /// The whole day, midnight to midnight, a row per task. Drawn by hand: a chart's own axis put
+    /// the task names over the bars, and a name needs a column of its own to be read.
     @ViewBuilder
     private var timeline: some View {
-        let interval = period.interval
-        let stretches = store.stretches(in: interval, project: spaceId, now: now)
-        if stretches.isEmpty {
+        let rows = rows(period.interval)
+        let hours = [0, 3, 6, 9, 12, 15, 18, 21, 24]
+        let rowHeight: CGFloat = 24
+        if rows.isEmpty {
             Text("No time tracked on this day.").foregroundStyle(.secondary)
         } else {
-            let rows = stretches.map { stretch -> Row in
-                let name = "\(stretch.task.displayRef) \(stretch.task.title)".trimmingCharacters(in: .whitespaces)
-                return Row(id: stretch.id, label: name.count > 34 ? name.prefix(33) + "…" : name,
-                           start: stretch.start, end: stretch.end,
-                           color: store.project(stretch.task.projectId)?.color ?? .gray)
-            }
-            let labels = Set(rows.map(\.label)).count
-            // From the hour of the first stretch to the hour after the last: a day of two
-            // stretches in the afternoon should not be drawn against 24 empty hours.
-            let calendar = Calendar.current
-            let from = calendar.dateInterval(of: .hour, for: rows[0].start)?.start ?? interval.start
-            let last = rows.map(\.end).max() ?? interval.end
-            let to = min(interval.end, calendar.dateInterval(of: .hour, for: last.addingTimeInterval(-1))?.end ?? interval.end)
-            Chart(rows) { row in
-                BarMark(xStart: .value("Start", row.start), xEnd: .value("End", row.end),
-                        y: .value("Task", row.label), height: .fixed(12))
-                    .foregroundStyle(row.color)
-                    .cornerRadius(3)
-            }
-            .chartXScale(domain: from...max(to, from.addingTimeInterval(3600)))
-            .chartXAxis {
-                AxisMarks(values: .stride(by: .hour)) { _ in
-                    AxisGridLine().foregroundStyle(Color.primary.opacity(0.08))
-                    AxisValueLabel(format: .dateTime.hour())
+            GeometryReader { geometry in
+                // The names get a good third of the width, and no more than they can use.
+                let names = min(300, geometry.size.width * 0.36)
+                let figures: CGFloat = 58
+                let track = max(40, geometry.size.width - names - figures - 20)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows) { row in
+                        HStack(spacing: 10) {
+                            Text(row.label).lineLimit(1).truncationMode(.tail)
+                                .frame(width: names, alignment: .leading)
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.primary.opacity(0.05)).frame(width: track, height: 12)
+                                ForEach(hours.dropFirst().dropLast(), id: \.self) { hour in
+                                    Rectangle().fill(Color.primary.opacity(0.08))
+                                        .frame(width: 1, height: rowHeight)
+                                        .offset(x: track * Double(hour) / 24)
+                                }
+                                ForEach(Array(row.spans.enumerated()), id: \.offset) { _, span in
+                                    RoundedRectangle(cornerRadius: 3).fill(row.color)
+                                        // A stretch of a minute would be invisible at this scale.
+                                        .frame(width: max(3, track * (span.to - span.from)), height: 12)
+                                        .offset(x: track * span.from)
+                                }
+                            }
+                            .frame(width: track, height: rowHeight, alignment: .leading)
+                            Text(Fmt.short(row.seconds)).monospacedDigit().foregroundStyle(.secondary)
+                                .frame(width: figures, alignment: .trailing)
+                        }
+                        .help("\(row.label) · \(Fmt.short(row.seconds))")
+                    }
+                    ZStack(alignment: .topLeading) {
+                        ForEach(hours, id: \.self) { hour in
+                            Text(String(format: "%02d", hour)).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                                .fixedSize()
+                                .frame(width: 30)
+                                .offset(x: track * Double(hour) / 24 - 15)
+                        }
+                    }
+                    .frame(width: track, height: 18, alignment: .topLeading)
+                    .padding(.leading, names + 10).padding(.top, 2)
                 }
             }
-            .chartYAxis {
-                AxisMarks(position: .leading) { _ in AxisValueLabel() }
-            }
-            .frame(height: CGFloat(labels) * 26 + 30)
+            .frame(height: CGFloat(rows.count) * rowHeight + 20)
         }
     }
 }

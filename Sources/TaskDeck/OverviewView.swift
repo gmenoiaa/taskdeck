@@ -67,11 +67,16 @@ struct OverviewView: View {
                             days: store.trackedByDay(in: period, project: spaceId, now: now))
         let placements = placements
         let shown = placements.filter { !$0.hidden }.map(\.widget)
+        let widths = Dictionary(uniqueKeysWithValues: placements.map { ($0.widget, $0.width) })
+        let columns = placements.contains { !$0.hidden && $0.width != .full }
         ScrollView {
-            VStack(alignment: .leading, spacing: customising ? 12 : 22) {
+            OverviewGrid(spacing: customising ? 12 : 22, expandsLone: !customising) {
                 if customising {
                     customiseBar
-                    ForEach(shown) { widget in card(widget, moment, shown: shown) }
+                    ForEach(shown) { widget in
+                        card(widget, moment, shown: shown, width: widths[widget] ?? .full)
+                            .layoutValue(key: OverviewGrid.Column.self, value: widths[widget] ?? .full)
+                    }
                     let hidden = placements.filter(\.hidden).map(\.widget)
                     if !hidden.isEmpty {
                         Text("Hidden").font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.top, 6)
@@ -81,13 +86,16 @@ struct OverviewView: View {
                     periodBar(moment)
                     if shown.isEmpty { Text("Every widget is hidden.").foregroundStyle(.secondary) }
                     ForEach(shown) { widget in
-                        content(widget, moment).contextMenu { menu(widget, shown: shown) }
+                        content(widget, moment)
+                            .contextMenu { menu(widget, shown: shown, width: widths[widget] ?? .full) }
+                            .layoutValue(key: OverviewGrid.Column.self, value: widths[widget] ?? .full)
                     }
                 }
             }
             .padding(20)
             // Wider than this, the figures drift apart and rows become hard to follow across.
-            .frame(maxWidth: 860, alignment: .leading)
+            // Two widgets side by side need the room of two.
+            .frame(maxWidth: columns ? 1280 : 860, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
         .softScrollEdges()
@@ -184,7 +192,7 @@ struct OverviewView: View {
 
     private var customiseBar: some View {
         HStack(spacing: 8) {
-            Text("Drag a widget to move it. Hidden ones stay at the bottom.").foregroundStyle(.secondary)
+            Text("Drag a widget to move it. Widgets in the left and right columns pile up side by side.").foregroundStyle(.secondary)
             Spacer(minLength: 12)
             quiet(Button("Reset to default") { withAnimation { store.resetOverviewLayout() } })
                 .disabled(store.overviewLayout.isEmpty)
@@ -195,7 +203,7 @@ struct OverviewView: View {
 
     /// A shown widget while customising: a strip to grab and act on, over its content, which is
     /// dimmed and takes no clicks so a drag never presses a button inside it.
-    private func card(_ widget: OverviewWidget, _ moment: Moment, shown: [OverviewWidget]) -> some View {
+    private func card(_ widget: OverviewWidget, _ moment: Moment, shown: [OverviewWidget], width: OverviewWidth) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "line.3.horizontal").foregroundStyle(.secondary)
@@ -203,6 +211,12 @@ struct OverviewView: View {
                 Spacer(minLength: 12)
                 step(widget, -1, "chevron.up", "Move up", shown: shown)
                 step(widget, 1, "chevron.down", "Move down", shown: shown)
+                Picker("Width of \(widget.title)", selection: Binding(
+                    get: { width }, set: { new in withAnimation { store.setOverviewWidget(widget, width: new) } })) {
+                    ForEach(OverviewWidth.allCases) { Image(systemName: $0.symbol).help($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize().controlSize(.small)
+                .help("Full width, or the left or right column. Widgets in a column pile up in their order.")
                 Button { withAnimation { store.setOverviewWidget(widget, hidden: true) } } label: {
                     Image(systemName: "eye.slash")
                 }
@@ -226,7 +240,7 @@ struct OverviewView: View {
         .draggable(widget.dragToken)
         .dropDestination(for: String.self) { items, _ in
             guard let dragged = items.first.flatMap(OverviewWidget.init(dragToken:)), dragged != widget else { return false }
-            withAnimation { store.moveOverviewWidget(dragged, to: widget) }
+            withAnimation { store.moveOverviewWidget(dragged, to: widget, takingColumn: true) }
             return true
         } isTargeted: { over in
             if over { dropTarget = widget } else if dropTarget == widget { dropTarget = nil }
@@ -258,8 +272,12 @@ struct OverviewView: View {
 
     /// The right-click menu of a widget outside customising; also the way to reorder without a drag.
     @ViewBuilder
-    private func menu(_ widget: OverviewWidget, shown: [OverviewWidget]) -> some View {
+    private func menu(_ widget: OverviewWidget, shown: [OverviewWidget], width: OverviewWidth) -> some View {
         Button("Hide \(widget.title)") { withAnimation { store.setOverviewWidget(widget, hidden: true) } }
+        Picker("Width", selection: Binding(
+            get: { width }, set: { new in withAnimation { store.setOverviewWidget(widget, width: new) } })) {
+            ForEach(OverviewWidth.allCases) { Text($0.label).tag($0) }
+        }
         let up = store.overviewNeighbour(of: widget, by: -1, among: shown)
         let down = store.overviewNeighbour(of: widget, by: 1, among: shown)
         Button("Move Up") { if let up { withAnimation { store.moveOverviewWidget(widget, to: up) } } }

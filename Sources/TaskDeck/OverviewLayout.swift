@@ -46,11 +46,15 @@ enum OverviewWidget: String, CaseIterable, Identifiable {
 struct OverviewSlot: Codable, Hashable {
     var id: String
     var hidden = false
+    /// "left" or "right" for a widget in one of the two columns; nil for the whole width, which
+    /// is also what files saved before widgets had a width say.
+    var column: String?
 }
 
 struct OverviewPlacement: Identifiable, Hashable {
     let widget: OverviewWidget
     var hidden: Bool
+    var width = OverviewWidth.full
     var id: String { widget.rawValue }
 }
 
@@ -62,7 +66,8 @@ extension AppStore {
         var out: [OverviewPlacement] = []
         for slot in overviewLayout {
             guard let widget = OverviewWidget(rawValue: slot.id), !out.contains(where: { $0.widget == widget }) else { continue }
-            out.append(OverviewPlacement(widget: widget, hidden: slot.hidden))
+            out.append(OverviewPlacement(widget: widget, hidden: slot.hidden,
+                                         width: slot.column.flatMap(OverviewWidth.init(rawValue:)) ?? .full))
         }
         let all = OverviewWidget.allCases
         for (index, widget) in all.enumerated() where !out.contains(where: { $0.widget == widget }) {
@@ -73,7 +78,9 @@ extension AppStore {
     }
 
     private func setOverview(_ placements: [OverviewPlacement]) {
-        overviewLayout = placements.map { OverviewSlot(id: $0.widget.rawValue, hidden: $0.hidden) }
+        overviewLayout = placements.map { OverviewSlot(id: $0.widget.rawValue, hidden: $0.hidden,
+                         column: $0.width == .full ? nil : $0.width.rawValue)
+        }
         save()
     }
 
@@ -84,13 +91,24 @@ extension AppStore {
         setOverview(placements)
     }
 
-    /// Puts a widget where another one is; that one and those between shift by one.
-    func moveOverviewWidget(_ widget: OverviewWidget, to target: OverviewWidget) {
+    func setOverviewWidget(_ widget: OverviewWidget, width: OverviewWidth) {
+        var placements = overviewPlacements
+        guard let index = placements.firstIndex(where: { $0.widget == widget }) else { return }
+        placements[index].width = width
+        setOverview(placements)
+    }
+
+    /// Puts a widget where another one is; that one and those between shift by one. A dragged
+    /// widget also takes the column of the one it is dropped on: dropped on a card of the right
+    /// column, it is meant to go there.
+    func moveOverviewWidget(_ widget: OverviewWidget, to target: OverviewWidget, takingColumn: Bool = false) {
         var placements = overviewPlacements
         guard widget != target,
               let from = placements.firstIndex(where: { $0.widget == widget }),
               let to = placements.firstIndex(where: { $0.widget == target }) else { return }
-        placements.insert(placements.remove(at: from), at: to)
+        var moved = placements.remove(at: from)
+        if takingColumn { moved.width = placements.first { $0.widget == target }?.width ?? moved.width }
+        placements.insert(moved, at: to)
         setOverview(placements)
     }
 

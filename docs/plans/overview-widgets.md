@@ -170,27 +170,14 @@ Aggregation (`Store.swift`)
 
 **Done**: `due` (shown by default), `unlogged` (hidden by default, it repeats the toolbar's
 time-to-push button) and the clickable board pills. The board shows every column at once, so a
-pill opens the board rather than one column. Half-width widgets are not done.
+pill opens the board rather than one column.
 
-- `due`: tasks and goals due in the next 7 days and overdue ones, soonest first, using `Due`.
-- `unlogged`: the tasks behind the orange tile, with a **Log time** button per row that opens
-  the existing log sheet.
-- `board`: the column pills become clickable and open the board on that column.
-- Later, if wanted: half-width widgets side by side on a wide window. The plan keeps a single
-  column for now — it is the simplest thing to reorder by drag.
+## Phase 5 — Columns
 
-## Order of work
-
-1. Rebase on `main`.
-2. Phase 1 on its own: same content as today, now reorderable and hideable. Shippable alone.
-3. Phase 2: period bar, tiles, chart.
-4. Phase 3: calendar and breakdown; `bySpace` and `topTasks` become hidden by default here, not
-   before, so nothing disappears without its replacement. A layout the user already arranged is
-   left as they arranged it.
-5. Phase 4 as wanted.
-
-## Verifying
-
-`swift build` after each phase, then `./build.sh --install --open`. Layout, drag-and-drop and
-the charts can only be judged from screenshots. An old `data.json` without `overviewLayout` must
-open with the default layout; a file with an unknown widget id must open and ignore it.
+**Done.** Each widget takes the whole width or sits in the left or right column
+(`OverviewSlot.column`, optional). Widgets with a column that follow each other form a block of
+two columns, and each column piles its own widgets in their order, so a short widget can sit
+under another beside a tall one. `OverviewGrid`, a custom `Layout`, does this. A block with
+widgets on one side only spreads over the whole width, except while customising, where a card
+shows the column it was given. A widget dragged onto a card takes that card's column. With any
+widget in a column the overview may grow to 1280 points instead of 860.
