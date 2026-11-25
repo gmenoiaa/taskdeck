@@ -67,14 +67,16 @@ final class AppStore {
     /// A space whose standup sheet should open in the main window: set by the menu bar, a command
     /// or a notification, and cleared by the window once it shows the sheet. Not saved.
     var openStandup: UUID?
-    /// A pull request's link dropped on the board, for the board to open the review sheet with. Not saved.
-    var droppedPullRequest: String?
+    /// A request for the main window to open the review sheet: a pull request's link dropped on the
+    /// board, or an empty text from the menu bar, where the sheet looks at the clipboard itself.
+    /// Cleared by the window once it shows the sheet. Not saved.
+    var openReview: String?
 
     /// Takes a dropped text when it is a pull request's link. Cards are dragged as text too, so
     /// the board's drop targets ask this first.
     func takeDrop(_ text: String) -> Bool {
         guard Orca.isInstalled, CodeReview.pullRequest(text) != nil else { return false }
-        droppedPullRequest = text
+        openReview = text
         return true
     }
     /// The overview's widgets in the user's order; empty means the default. Read it through

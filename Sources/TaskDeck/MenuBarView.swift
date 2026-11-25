@@ -101,6 +101,15 @@ struct MenuBarView: View {
                     openWindow(id: "main")
                     NSApp.activate(ignoringOtherApps: true)
                 }
+                // The sheet belongs to the main window, so this asks the window for it, like a standup.
+                if Orca.isInstalled {
+                    Button("Review PR…") {
+                        store.openReview = ""
+                        openWindow(id: "main")
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
+                    .help("Start a code review session from a pull request link")
+                }
                 if !running.isEmpty {
                     Button("Pause all") { store.stopAll() }
                 }
