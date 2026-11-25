@@ -663,12 +663,15 @@ private struct WaitingList: View {
                     }
                 }
                 // A scroll view has no height of its own in a popover.
-                .frame(height: min(360, CGFloat(items.count) * 44))
+                .frame(height: min(360, items.reduce(0) { $0 + Self.height($1) + 4 }))
             }
         }
         .padding(14)
         .frame(width: 340)
     }
+
+    /// Rows have a fixed height because the list is sized by adding them up.
+    private static func height(_ item: AppStore.WaitingItem) -> CGFloat { item.note == nil ? 40 : 68 }
 
     private func row(_ item: AppStore.WaitingItem) -> some View {
         HStack(alignment: .top, spacing: 8) {
@@ -682,12 +685,15 @@ private struct WaitingList: View {
                 let alone = item.task == nil && item.title == nil
                 Text(item.detail).font(alone ? .body : .caption)
                     .foregroundStyle(alone ? .primary : .secondary).lineLimit(1)
+                if let note = item.note {
+                    Text(note).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
             }
             Spacer(minLength: 0)
         }
-        .frame(height: 40)
+        .frame(height: Self.height(item), alignment: .top)
         .contentShape(Rectangle())
-        .help(item.detail)
+        .help(item.note.map { "\(item.detail)\n\($0)" } ?? item.detail)
     }
 
     private func icon(_ kind: AppStore.WaitingItem.Kind) -> String {

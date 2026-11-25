@@ -46,12 +46,39 @@ enum Orca {
         let isMain: Bool
         let createdAt: Date?
         var status: Status
+        /// The pane ("tab:leaf") of the agent Orca's own launcher started last; nil for an agent
+        /// started by a typed command.
+        var agentPane: String?
+        /// What the user last typed to that agent.
+        var lastPrompt: String?
     }
 
     struct PullRequest: Hashable {
         let number: Int
         /// "open", "merged" or "closed".
         let state: String
+    }
+
+    struct PullRequestDetail: Hashable {
+        let number: Int
+        let title: String
+        /// The description as written, Markdown and all.
+        let body: String
+        /// "open", "merged" or "closed".
+        let state: String
+        let draft: Bool
+        let createdAt: Date?
+        let mergedAt: Date?
+        let closedAt: Date?
+
+        /// What happened to it in the period, latest first: "merged", then "opened".
+        func events(in period: DateInterval) -> [(String, Date)] {
+            var out: [(String, Date)] = []
+            if let mergedAt, period.contains(mergedAt) { out.append(("merged", mergedAt)) }
+            else if let closedAt, state == "closed", period.contains(closedAt) { out.append(("closed without merging", closedAt)) }
+            if let createdAt, period.contains(createdAt) { out.append(("opened", createdAt)) }
+            return out
+        }
     }
 
     /// Agents offered in the app. Orca knows more ids; these are the two it manages accounts for.
@@ -73,14 +100,7 @@ enum Orca {
 
     /// An app started from the Dock has a short PATH, so the usual install places are checked directly.
     static var executable: String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "/usr/local/bin/orca",
-            "/opt/homebrew/bin/orca",
-            "\(home)/.local/bin/orca",
-            "/Applications/Orca.app/Contents/Resources/bin/orca",
-        ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        Shell.find("orca", also: ["/Applications/Orca.app/Contents/Resources/bin/orca"])
     }
 
     static var isInstalled: Bool { executable != nil }
@@ -146,6 +166,112 @@ enum Orca {
         return session
     }
 
+    // MARK: Adding a repository
+
+    /// "owner/name" from what was typed: that itself, a github.com address or an ssh one.
+    /// Nil for anything else.
+    static func githubSlug(_ typed: String) -> String? {
+        var text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        var isAddress = false
+        if let at = text.range(of: "github.com:") ?? text.range(of: "github.com/") {
+            text = String(text[at.upperBound...])
+            isAddress = true
+        } else if text.contains(":") {
+            return nil
+        }
+        let parts = text.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        // A pasted page address goes on after the name ("/tree/main", "/pull/3").
+        guard parts.count == 2 || (isAddress && parts.count > 2) else { return nil }
+        var name = parts[1]
+        if name.hasSuffix(".git") { name.removeLast(4) }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        let plain = { (part: String) in
+            !part.isEmpty && part != "." && part != ".." && part.unicodeScalars.allSatisfy { $0.isASCII && allowed.contains($0) }
+        }
+        return plain(parts[0]) && plain(name) ? "\(parts[0])/\(name)" : nil
+    }
+
+    /// Clones a GitHub repository into a new folder of `parent` and adds it to Orca.
+    /// `account` is the `gh` user the clone runs as; empty means gh's active account.
+    static func cloneRepository(slug: String, into parent: String, account: String?) async throws -> Repo {
+        guard let gh = ghExecutable else {
+            throw Failure.failed("The gh command was not found, and the clone is made with it. Install it with “brew install gh”.")
+        }
+        let name = slug.split(separator: "/").last.map(String.init) ?? slug
+        let path = try newDirectoryPath(named: name, in: parent)
+        // A large repository takes far longer than anything asked of Orca.
+        guard let reply = await runGH(gh, ["repo", "clone", slug, path], account: account, timeout: 1800) else {
+            throw Failure.failed("gh could not be started.")
+        }
+        guard reply.status == 0 else {
+            if reply.status == 9, let account, !account.isEmpty {
+                throw Failure.failed("gh has no token for \(account). Run “gh auth login” in a terminal.")
+            }
+            throw Failure.failed(message(reply: nil, status: reply.status, out: reply.out, err: reply.err))
+        }
+        do {
+            return try await add(path: path)
+        } catch {
+            throw Failure.failed("The repository was cloned to \(path), but Orca did not take it: \(error.localizedDescription)")
+        }
+    }
+
+    /// Creates an empty folder in `parent` and adds it to Orca. It is a plain folder, not a git
+    /// repository: Orca starts sessions in the folder itself.
+    static func createFolder(named name: String, in parent: String) async throws -> Repo {
+        let path = try newDirectoryPath(named: name, in: parent)
+        do {
+            try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
+        } catch {
+            throw Failure.failed("The folder could not be created: \(error.localizedDescription)")
+        }
+        do {
+            return try await add(path: path)
+        } catch {
+            // Nothing is left behind, so trying again does not find the name taken. `rmdir` only
+            // ever removes an empty folder.
+            rmdir(path)
+            throw error
+        }
+    }
+
+    /// Where a new folder called `name` would go inside `parent`. Throws when the parent is not a
+    /// directory, the name is not a single folder name, or something is already there.
+    static func newDirectoryPath(named name: String, in parent: String) throws -> String {
+        guard let directory = resolvedDirectory(parent) else {
+            throw Failure.failed("“\(parent)” is not a directory on this Mac.")
+        }
+        let name = name.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !name.contains("/"), !name.hasPrefix(".") else {
+            throw Failure.failed("“\(name)” cannot be used as a folder name.")
+        }
+        let path = (directory as NSString).appendingPathComponent(name)
+        guard !FileManager.default.fileExists(atPath: path) else {
+            throw Failure.failed("\(path) already exists.")
+        }
+        return path
+    }
+
+    /// Adds a folder to Orca and returns it as Orca lists it.
+    private static func add(path: String) async throws -> Repo {
+        _ = try await run(["repo", "add", "--path", path])
+        // The answer's shape is not relied on; the list is, as everywhere else.
+        let wanted = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard let repo = try await repos().first(where: {
+            URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path == wanted
+        }) else {
+            throw Failure.failed("Orca added \(path) but does not list it.")
+        }
+        return repo
+    }
+
+    /// The folder most of the given repositories sit in, as a place to suggest for a new one.
+    static func usualParent(of repos: [Repo]) -> String? {
+        let parents = repos.map { ($0.path as NSString).deletingLastPathComponent }
+        let counts = Dictionary(parents.map { ($0, 1) }, uniquingKeysWith: +)
+        return counts.max { ($0.value, $1.key) < ($1.value, $0.key) }?.key
+    }
+
     /// Deletes a worktree's checkout and takes it out of Orca. Without `force` git refuses a
     /// checkout with uncommitted changes, so nothing that is not saved somewhere else goes with
     /// it. `force` deletes those changes too. Either way Orca keeps any branch it cannot prove
@@ -181,16 +307,7 @@ enum Orca {
         guard let gh = ghExecutable else { return nil }
         let list = ["pr", "list", "--repo", slug, "--head", branch, "--state", "all",
                     "--json", "number,state", "--limit", "10"]
-        let reply: (status: Int32, out: Data, err: Data)?
-        if let account, !account.isEmpty {
-            // The token goes from gh's keyring to gh inside the shell; this app never reads it.
-            // Without a token nothing is asked: gh would silently answer as the active account.
-            let script = "T=\"$(\"$0\" auth token --user \"$1\")\"; [ -n \"$T\" ] || exit 9; shift; GH_TOKEN=\"$T\" exec \"$0\" \"$@\""
-            reply = try? await exec("/bin/sh", ["-c", script, gh, account] + list)
-        } else {
-            reply = try? await exec(gh, list)
-        }
-        guard let reply, reply.status == 0,
+        guard let reply = await runGH(gh, list, account: account), reply.status == 0,
               let rows = (try? JSONSerialization.jsonObject(with: reply.out)) as? [[String: Any]] else { return nil }
         let found = rows.compactMap { row -> PullRequest? in
             guard let number = row["number"] as? Int, let state = row["state"] as? String else { return nil }
@@ -201,8 +318,40 @@ enum Orca {
         return .some(best)
     }
 
+    /// Runs gh as the given account, or as gh's active one when none is given.
+    private static func runGH(_ gh: String, _ args: [String], account: String?,
+                              timeout: TimeInterval = 180) async -> (status: Int32, out: Data, err: Data)? {
+        guard let account, !account.isEmpty else { return try? await exec(gh, args, timeout: timeout) }
+        // The token goes from gh's keyring to gh inside the shell; this app never reads it.
+        // Without a token nothing is asked: gh would silently answer as the active account.
+        let script = "T=\"$(\"$0\" auth token --user \"$1\")\"; [ -n \"$T\" ] || exit 9; shift; GH_TOKEN=\"$T\" exec \"$0\" \"$@\""
+        return try? await exec("/bin/sh", ["-c", script, gh, account] + args, timeout: timeout)
+    }
+
+    /// A pull request's title, draft flag and dates, for the standup. Orca and the branch lookup
+    /// give only its number and state. Nil when gh is missing or GitHub did not answer.
+    static func pullRequestDetail(_ url: URL, account: String?) async -> PullRequestDetail? {
+        guard let gh = ghExecutable else { return nil }
+        let args = ["pr", "view", url.absoluteString, "--json", "number,title,body,state,isDraft,createdAt,mergedAt,closedAt"]
+        guard let reply = await runGH(gh, args, account: account), reply.status == 0,
+              let row = (try? JSONSerialization.jsonObject(with: reply.out)) as? [String: Any],
+              let number = row["number"] as? Int, let state = row["state"] as? String else { return nil }
+        let iso = ISO8601DateFormatter()
+        // GitHub sends an empty string (or the zero date) for what has not happened yet.
+        func date(_ key: String) -> Date? {
+            (row[key] as? String).flatMap { iso.date(from: $0) }.flatMap { $0.timeIntervalSince1970 > 0 ? $0 : nil }
+        }
+        return PullRequestDetail(number: number, title: row["title"] as? String ?? "",
+                                 body: row["body"] as? String ?? "", state: state.lowercased(),
+                                 draft: row["isDraft"] as? Bool ?? false, createdAt: date("createdAt"),
+                                 mergedAt: date("mergedAt"), closedAt: date("closedAt"))
+    }
+
     /// "~/.claude-work" as a full path. Nil when it is not an existing directory.
-    static func resolvedHome(_ typed: String) -> String? {
+    static func resolvedHome(_ typed: String) -> String? { resolvedDirectory(typed) }
+
+    /// A typed directory as a full path, "~" expanded. Nil when it is not an existing directory.
+    static func resolvedDirectory(_ typed: String) -> String? {
         let path = (typed.trimmingCharacters(in: .whitespaces) as NSString).expandingTildeInPath
         var isDirectory: ObjCBool = false
         guard path.hasPrefix("/"), FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
@@ -275,8 +424,11 @@ enum Orca {
         // terminal a new one, and switching to the old one does nothing. So the worktree's live
         // terminals are asked for each time.
         var handle: String?
-        if let path = session.path,
-           let answer = try? await run(["terminal", "list", "--worktree", "path:\(path)"]) {
+        // By the worktree's id where it is known: several of Orca's workspaces can sit on one
+        // folder, and the path then names none of them (no terminals come back) or another one.
+        let selector = session.worktreeId.map { "id:\($0)" } ?? session.path.map { "path:\($0)" }
+        if let selector,
+           let answer = try? await run(["terminal", "list", "--worktree", selector]) {
             let live = terminals(in: answer)
             handle = live.first { $0["handle"] as? String == session.terminalHandle }?["handle"] as? String
                 // The agent's terminal rather than a plain shell opened beside it.
@@ -305,6 +457,8 @@ enum Orca {
         var tool: String?
         /// The end of the agent's last answer, once it stopped.
         var lastMessage: String?
+        /// The question or permission the agent is stopped on, when its transcript ends on one.
+        var ask: String?
         var prNumber: Int?
         /// An open pull request that is still marked as a draft.
         var prDraft = false
@@ -323,6 +477,30 @@ enum Orca {
         }
 
         var isAboutPullRequest: Bool { kind == .prOpen || kind == .prMerged || kind == .prClosed }
+
+        /// A few lines saying why the session stopped, for a notification or a list row: what it
+        /// asks for, or else the part of its last answer that says most.
+        var summary: String? {
+            if kind == .yourTurn, let ask { return Self.clip(Self.plain(ask)) }
+            guard let lastMessage, !lastMessage.isEmpty else { return nil }
+            let paragraphs = lastMessage.components(separatedBy: "\n\n").map(Self.plain).filter { !$0.isEmpty }
+            guard let first = paragraphs.first, let end = paragraphs.last else { return nil }
+            // Agents put the conclusion first, except a question, which closes the answer and is
+            // the thing to act on.
+            return Self.clip(end.hasSuffix("?") && paragraphs.count > 1 ? end : first)
+        }
+
+        /// Markdown reads as noise where nothing renders it.
+        private static func plain(_ text: String) -> String {
+            text.replacingOccurrences(of: "(?m)^\\s*(#{1,6}|>|[-*])\\s+", with: "", options: .regularExpression)
+                .replacingOccurrences(of: "\\*\\*|__|`", with: "", options: .regularExpression)
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+        }
+
+        private static func clip(_ text: String) -> String {
+            text.count > 280 ? String(text.prefix(279)) + "…" : text
+        }
 
         var label: String {
             switch kind {
@@ -360,11 +538,43 @@ enum Orca {
             let branch = (row["branch"] as? String ?? "").replacingOccurrences(of: "refs/heads/", with: "")
             // Orca gives times in milliseconds.
             let created = (row["createdAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+            let agents = row["agents"] as? [[String: Any]] ?? []
+            let latest = agents.max { ($0["updatedAt"] as? Double ?? 0) < ($1["updatedAt"] as? Double ?? 0) }
+            let prompt = (latest?["prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             return Worktree(id: id, repoId: repoId, repoName: row["repo"] as? String ?? "",
                             name: row["displayName"] as? String ?? URL(fileURLWithPath: path).lastPathComponent,
                             branch: branch, path: path, isMain: row["isMainWorktree"] as? Bool ?? false,
-                            createdAt: created, status: status(of: row))
+                            createdAt: created, status: status(of: row),
+                            agentPane: latest?["paneKey"] as? String,
+                            lastPrompt: (prompt ?? "").isEmpty ? nil : prompt)
         }
+    }
+
+    /// What the agent's terminal shows right now: one screen, as rendered. Nil when the agent's
+    /// terminal cannot be told apart from a plain shell opened beside it: a shell may show
+    /// anything, and this text is sent on to the review.
+    static func screen(of tree: Worktree, savedHandle: String?) async -> String? {
+        guard let answer = try? await run(["terminal", "list", "--worktree", "id:\(tree.id)"]) else { return nil }
+        let live = terminals(in: answer)
+        func pane(_ terminal: [String: Any]) -> String? {
+            guard let tab = terminal["tabId"] as? String, let leaf = terminal["leafId"] as? String else { return nil }
+            return "\(tab):\(leaf)"
+        }
+        let found = live.first { tree.agentPane != nil && pane($0) == tree.agentPane }
+            ?? live.first { savedHandle != nil && $0["handle"] as? String == savedHandle }
+            ?? live.filter { $0["agentIdentity"] is String }
+                .max { ($0["lastOutputAt"] as? Double ?? 0) < ($1["lastOutputAt"] as? Double ?? 0) }
+        guard let handle = found?["handle"] as? String,
+              let read = try? await run(["terminal", "read", "--terminal", handle, "--screen"]),
+              let terminal = read["terminal"] as? [String: Any],
+              // A screen that could not be rendered comes back as raw output, which is unreadable
+              // for a program that repaints its lines.
+              terminal["source"] as? String != "screen-unavailable",
+              let rows = terminal["tail"] as? [String] else { return nil }
+        let rule = CharacterSet(charactersIn: "─━═-_ ")
+        let lines = rows.map { $0.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
+            .filter { !$0.isEmpty && !$0.unicodeScalars.allSatisfy(rule.contains) }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
 
     /// Whether a ticket reference appears in a worktree's name or branch as a whole word:
@@ -555,60 +765,12 @@ enum Orca {
         throw Failure.failed(message(reply: reply, status: status, out: out, err: err))
     }
 
-    /// What a finished command left behind, filled in from three queues at once.
-    private final class Collected: @unchecked Sendable {
-        var out = Data()
-        var err = Data()
-    }
-
-    /// Runs a command off the main thread and returns its exit status and output.
-    /// The end is learnt from the process's termination handler. `waitUntilExit` was used before and
-    /// sometimes never returned for a command that had already finished; every later refresh then
-    /// waited behind it, and the cards kept showing what was true at that moment.
-    private static func exec(_ executable: String, _ args: [String]) async throws -> (status: Int32, out: Data, err: Data) {
-        try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = args
-            // Outside any repository, so Orca never infers a worktree from where this app was started.
-            process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-            let outPipe = Pipe(), errPipe = Pipe()
-            process.standardOutput = outPipe
-            process.standardError = errPipe
-            process.standardInput = FileHandle.nullDevice
-
-            let collected = Collected()
-            let finished = DispatchGroup()
-            finished.enter()
-            process.terminationHandler = { _ in finished.leave() }
-            do {
-                try process.run()
-            } catch {
-                process.terminationHandler = nil
-                continuation.resume(throwing: error)
-                return
-            }
-            // Both pipes are drained while the command runs; a full pipe would block it forever.
-            let queue = DispatchQueue.global(qos: .userInitiated)
-            finished.enter()
-            queue.async {
-                collected.out = outPipe.fileHandleForReading.readDataToEndOfFile()
-                finished.leave()
-            }
-            finished.enter()
-            queue.async {
-                collected.err = errPipe.fileHandleForReading.readDataToEndOfFile()
-                finished.leave()
-            }
-            // A command that hangs must not hold up everything after it. Creating a worktree is the
-            // slowest thing asked of Orca, and it takes seconds.
-            queue.asyncAfter(deadline: .now() + 180) {
-                if process.isRunning { process.terminate() }
-            }
-            finished.notify(queue: queue) {
-                continuation.resume(returning: (process.terminationStatus, collected.out, collected.err))
-            }
-        }
+    /// Creating a worktree is the slowest thing asked of Orca, and it takes seconds; the shared
+    /// runner's limit is far above that. A clone is the one command given longer.
+    private static func exec(_ executable: String, _ args: [String],
+                             timeout: TimeInterval = 180) async throws -> (status: Int32, out: Data, err: Data) {
+        let result = try await Shell.run(executable, args, timeout: timeout)
+        return (result.status, result.out, result.err)
     }
 
     private static func message(reply: [String: Any]?, status: Int32, out: Data, err: Data) -> String {

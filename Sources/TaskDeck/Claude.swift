@@ -292,8 +292,8 @@ enum Claude {
     (Slack, Teams or similar) or reads it out in the meeting, so it must read as their own words.
 
     You get the facts the developer's task app knows for this team only: tickets with time \
-    tracked, column moves and agent sessions in the period, the board as it is now, tickets that \
-    wait, tickets newly assigned, and sometimes the developer's previous update.
+    tracked, column moves, agent sessions and pull requests in the period, the board as it is now, \
+    tickets that wait, tickets newly assigned, and sometimes the developer's previous update.
 
     - Write in the first person, as the developer ("Fixed…", "Reviewing…"). Plain English: short \
     sentences, common words, active voice.
@@ -301,6 +301,9 @@ enum Claude {
     tracked was worked on; say it was finished only when it is in a finished column, or closed or \
     merged in its tracker.
     - Name each ticket by its reference and a few words of its title, so the team knows which one.
+    - Pull requests: one merged in the period is finished work, one opened in the period is work \
+    sent for review, one open and not a draft waits on its review. Give its number ("PR #212"). \
+    A pull request merged or closed before the period is not news.
     - Group small items; leave out a ticket with only a few minutes and nothing else to say.
     - Today: the work in progress and the timer that is running, then what is due soon. If the \
     previous update planned something that is still open, it belongs in Today. Do not repeat \

@@ -121,6 +121,8 @@ struct Project: Identifiable, Codable, Hashable {
     var standup: StandupSettings?
     /// Hours aimed at per working day (Monday to Friday) in this space; nil for no target.
     var dailyTargetHours: Double?
+    /// How much of this space the review may send to Claude: a `ReviewDetail`. Nil is status only.
+    var reviewDetail: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }

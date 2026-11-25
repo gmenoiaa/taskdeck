@@ -80,6 +80,8 @@ extension AppStore {
         var title: String?
         var session: AgentSession?
         var detail: String
+        /// What the session asks for or last said, under the detail.
+        var note: String?
     }
 
     /// What the bell and the Dock badge show: everything waiting, less what was cleared by hand.
@@ -119,7 +121,7 @@ extension AppStore {
                 let key = session.worktreeId ?? session.id.uuidString
                 if status.kind == .yourTurn {
                     items.append(WaitingItem(id: "turn-\(key)", kind: .yourTurn, task: task, session: session,
-                                             detail: "Your turn in \(session.name)"))
+                                             detail: "Your turn in \(session.name)", note: status.summary))
                 } else if notify.badgePullRequests, status.kind == .prOpen, !status.prDraft {
                     items.append(WaitingItem(id: "pr-\(key)", kind: .pullRequest, task: task, session: session,
                                              detail: "\(status.label) is open"))
@@ -154,6 +156,7 @@ extension AppStore {
         guard sessionStatuses != nil else { return }
         var seen: [String: Orca.Status.Kind] = [:]
         var ended: Set<String> = []
+        var stopped = false
         for task in tasks where !task.archived {
             for session in sessions(of: task) {
                 guard let id = session.worktreeId, let status = status(of: session) else { continue }
@@ -172,17 +175,25 @@ extension AppStore {
                                       body: label(task))
                     }
                 case .yourTurn, .prOpen, .idle:
-                    guard before == .working, notify.sessions else { break }
+                    guard before == .working else { break }
+                    stopped = true
+                    guard notify.sessions else { break }
                     let title = status.kind == .prOpen ? "Pull request opened"
                         : status.kind == .yourTurn ? "Your turn" : "Agent stopped"
-                    let tail = status.lastMessage.map { "\n\(String($0.suffix(160)))" } ?? ""
-                    Notifier.send(title: title, body: label(task) + tail)
+                    // The banner says what the agent wants, so the session need not be opened
+                    // to find out whether it can wait.
+                    if let summary = status.summary {
+                        Notifier.send(title: title, subtitle: label(task), body: summary)
+                    } else {
+                        Notifier.send(title: title, body: label(task))
+                    }
                 case .working, .gone:
                     break
                 }
             }
         }
         sessionKinds = seen
+        if stopped { reviewAfterSessionStopped() }
         // Everything ended and seen counts as said, also what was found ended at the first look.
         // Ends of sessions that no longer exist are dropped so the list does not grow for ever.
         let known = announcedPullRequests.filter { seen[String($0.split(separator: "|").first ?? "")] != nil }
@@ -311,11 +322,15 @@ enum Notifier {
 
     /// With `startTask`, the notification carries a "Start Timer" button for that task, counting
     /// from `since`.
-    static func send(title: String, body: String, startTask: UUID? = nil, since: Date? = nil, standup: UUID? = nil) {
+    static func send(title: String, subtitle: String? = nil, body: String, startTask: UUID? = nil,
+                     since: Date? = nil, standup: UUID? = nil) {
         guard available else { return }
         let content = UNMutableNotificationContent()
         content.title = title
+        if let subtitle { content.subtitle = subtitle }
         content.body = body
+        // The list of what was sent has one text per notification.
+        let body = [subtitle, body].compactMap { $0 }.joined(separator: "\n")
         content.sound = notificationSound
         if let startTask, let since {
             content.categoryIdentifier = startCategory

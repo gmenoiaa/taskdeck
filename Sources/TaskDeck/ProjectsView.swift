@@ -174,6 +174,14 @@ struct ProjectEditor: View {
                         Text("The repositories are offered first when you start a session from one of this space's tasks, and their Orca worktrees named after a ticket show on that task. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    Section("Review") {
+                        Picker("Review sends", selection: Binding(get: { project.review },
+                                                                  set: { project.reviewDetail = $0 == .status ? nil : $0.rawValue })) {
+                            ForEach(ReviewDetail.allCases) { Text($0.label).tag($0) }
+                        }
+                        Text(project.review.hint + " One Claude login reviews every space (Settings, Agents), so this is what that login gets to see of this space. Private notes are never sent.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Section("First message to the agent") {
                         TextEditor(text: Binding(get: { project.sessionPrompt ?? "" }, set: { project.sessionPrompt = $0 }))
                             .font(.callout.monospaced())

@@ -99,6 +99,8 @@ struct OverviewView: View {
         switch widget {
         case .standup: standup(now: moment.now)
         case .time: time(moment)
+        // Draws its own title, which carries its buttons.
+        case .review: ReviewSection(spaceId: spaceId, onDetails: onDetails)
         case .chart: chart(moment)
         case .calendar:
             section(.calendar) {

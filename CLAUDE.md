@@ -49,6 +49,8 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
 - Colours come from `Theme`; `Theme.accent` (red) is the app tint. Neutral controls pass
   `.tint(nil)`.
 - Private notes are never sent to the AI — the UI promises this, keep it true.
+- The review (`Review.swift`) runs on one Claude Code login for every space, so each space's data
+  goes out only at that space's `reviewDetail` level; anything new it sends must respect the level.
 - Comments explain *why*, not *what*. User-facing text is plain English, no marketing tone.
 
 ## Memory and identity files

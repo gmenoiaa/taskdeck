@@ -43,6 +43,20 @@ final class AppStore {
     var ignoredAssigned: Set<String> = []
     /// When the end-of-day reminder about unlogged time was last sent.
     @ObservationIgnored var unloggedRemindedAt: Date?
+    /// What the last review found, over every space.
+    var review: Review?
+    /// The Claude home whose login runs the review, as typed; empty for the default one.
+    var reviewHome = ""
+    var reviewModel = ClaudeCode.defaultModel
+    /// Whether a session that stops starts a review by itself.
+    var reviewWhenSessionStops = false
+    var reviewing = false
+    /// Review lines the user dismissed, by task id, with what each was about (`ReviewItem.key`).
+    var reviewDismissed: [String: String] = [:]
+    /// When a review last started, so automatic ones keep their distance.
+    @ObservationIgnored var reviewRanAt: Date?
+    /// Exactly what the last request to Claude held, to be read in the app. Not saved.
+    var lastReviewPrompt: String?
     /// The last standup update written for each space, by space id.
     var standups: [UUID: StandupNote] = [:]
     /// When each space's standup reminder was last sent, so it comes once a day.
@@ -77,6 +91,11 @@ final class AppStore {
     var removingWorktrees: Set<String> = []
     /// Pull requests found by asking GitHub directly, by worktree id, for when Orca reports none.
     @ObservationIgnored private var pullRequests: [String: Orca.PullRequest] = [:]
+    /// What each stopped session's transcript ends on, by worktree id. Read again on every refresh.
+    @ObservationIgnored private var transcripts: [String: SessionTranscript.Last] = [:]
+    /// Title, draft flag and dates of the agent sessions' pull requests, by their page. Read for
+    /// a standup only; a merged or closed one is not asked about again.
+    @ObservationIgnored private var pullRequestDetails: [URL: Orca.PullRequestDetail] = [:]
     @ObservationIgnored private var pullRequestAsked: [String: Date] = [:]
     @ObservationIgnored private var orcaRepos: [Orca.Repo] = []
     @ObservationIgnored private var orcaReposAt = Date.distantPast
@@ -112,6 +131,11 @@ final class AppStore {
         /// Keyed by the space's UUID string: dictionaries with UUID keys encode as arrays.
         var standups: [String: StandupNote]?
         var standupRemindedAt: [String: Date]?
+        var review: Review?
+        var reviewHome: String?
+        var reviewModel: String?
+        var reviewWhenSessionStops: Bool?
+        var reviewDismissed: [String: String]?
         var overviewLayout: [OverviewSlot]?
     }
 
@@ -331,6 +355,11 @@ final class AppStore {
             goals = snap.goals ?? []
             standups = Self.byUUID(snap.standups)
             standupRemindedAt = Self.byUUID(snap.standupRemindedAt)
+            review = snap.review
+            reviewHome = snap.reviewHome ?? ""
+            reviewModel = snap.reviewModel ?? ClaudeCode.defaultModel
+            reviewWhenSessionStops = snap.reviewWhenSessionStops ?? false
+            reviewDismissed = snap.reviewDismissed ?? [:]
             overviewLayout = snap.overviewLayout ?? []
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
@@ -358,6 +387,9 @@ final class AppStore {
                             goals: goals.isEmpty ? nil : goals,
                             standups: standups.isEmpty ? nil : Self.byString(standups),
                             standupRemindedAt: standupRemindedAt.isEmpty ? nil : Self.byString(standupRemindedAt),
+                            review: review, reviewHome: reviewHome.isEmpty ? nil : reviewHome,
+                            reviewModel: reviewModel, reviewWhenSessionStops: reviewWhenSessionStops,
+                            reviewDismissed: reviewDismissed.isEmpty ? nil : reviewDismissed,
                             overviewLayout: overviewLayout.isEmpty ? nil : overviewLayout)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
@@ -827,6 +859,7 @@ final class AppStore {
             orcaReposAt = Date()
         }
         link(trees, spaces: spaces)
+        await readTranscripts(trees)
         publish(trees)
         if await askGitHub(trees, limit: force ? 40 : 3) { publish(trees) }
     }
@@ -859,6 +892,22 @@ final class AppStore {
         if linkedSessions != fresh { linkedSessions = fresh }
     }
 
+    /// Reads what the agent last said from Claude Code's transcript, for the sessions of tasks
+    /// that stopped: Orca knows the answer only of agents its own launcher started.
+    private func readTranscripts(_ trees: [Orca.Worktree]) async {
+        let sessions = tasks.filter { !$0.archived }.flatMap(sessions(of:))
+        let mine = Set(sessions.compactMap(\.worktreeId))
+        let homes = SessionTranscript.homes(Array(Set(sessions.compactMap(\.claudeHome))).sorted())
+        var fresh: [String: SessionTranscript.Last] = [:]
+        for tree in trees where mine.contains(tree.id) && tree.status.kind != .working {
+            // A session waiting for me is read even when Orca has its answer: only the
+            // transcript says what it is waiting for.
+            guard tree.status.kind == .yourTurn || tree.status.lastMessage == nil else { continue }
+            fresh[tree.id] = await SessionTranscript.last(worktree: tree.path, homes: homes)
+        }
+        transcripts = fresh
+    }
+
     /// Turns Orca's answer into the statuses the views read, with GitHub's pull request where Orca has none.
     private func publish(_ trees: [Orca.Worktree]) {
         var fresh: [String: Orca.Status] = [:]
@@ -866,6 +915,12 @@ final class AppStore {
                                uniquingKeysWith: { first, _ in first })
         for tree in trees {
             var status = tree.status
+            if let last = transcripts[tree.id] {
+                // Orca's own answer wins where it has one: it is tied to the agent's terminal,
+                // while the transcript is found by folder.
+                if (status.lastMessage ?? "").isEmpty { status.lastMessage = last.message }
+                if status.kind == .yourTurn { status.ask = last.ask }
+            }
             if status.prNumber == nil, let pr = pullRequests[tree.id] {
                 status.prNumber = pr.number
                 if status.kind == .idle {
@@ -1064,7 +1119,8 @@ final class AppStore {
     func refreshSpace(_ spaceId: UUID) async -> (failed: Int, total: Int) {
         guard let space = project(spaceId) else { return (0, 0) }
         let targets = tasks.filter { $0.projectId == spaceId && !$0.archived && TicketFetcher.canFetch(project: space, task: $0) }
-        async let sessions: Void = refreshSessionStatuses(force: true)
+        // The pull requests are known only once the sessions are.
+        async let sessions: Void = { await self.refreshSessionStatuses(force: true); await self.refreshPullRequests(space: space) }()
         async let assigned: Void = refreshAssigned(space: space)
         @Sendable func read(_ task: TaskItem) async -> (UUID, TicketDetail?) {
             (task.id, try? await TicketFetcher.fetch(project: space, ref: task.ref, url: task.url))
@@ -1085,6 +1141,38 @@ final class AppStore {
         }
         _ = await (sessions, assigned)
         return (failed, targets.count)
+    }
+
+    /// The pull request of an agent session, as last read from GitHub for a standup.
+    func pullRequest(of session: AgentSession) -> Orca.PullRequestDetail? {
+        status(of: session)?.prURL.flatMap { pullRequestDetails[$0] }
+    }
+
+    /// Reads the pull requests of a space's agent sessions from GitHub, a few at a time.
+    func refreshPullRequests(space: Project) async {
+        var due: [(url: URL, account: String?)] = []
+        for task in tasks where task.projectId == space.id {
+            for session in sessions(of: task) {
+                guard let url = status(of: session)?.prURL, !due.contains(where: { $0.url == url }) else { continue }
+                if let known = pullRequestDetails[url], known.state != "open" { continue }
+                due.append((url, session.githubAccount ?? space.githubAccount))
+            }
+        }
+        await withTaskGroup(of: (URL, Orca.PullRequestDetail?).self) { group in
+            var next = 0
+            func add() {
+                guard next < due.count else { return }
+                let item = due[next]
+                next += 1
+                group.addTask { (item.url, await Orca.pullRequestDetail(item.url, account: item.account)) }
+            }
+            for _ in 0..<Self.spaceRefreshWidth { add() }
+            for await (url, detail) in group {
+                // A failed question keeps what was known.
+                if let detail { pullRequestDetails[url] = detail }
+                add()
+            }
+        }
     }
 
     /// Redmine tasks with tracked time that was not sent yet, most pending time first.

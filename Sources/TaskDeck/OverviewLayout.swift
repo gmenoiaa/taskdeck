@@ -2,7 +2,7 @@ import Foundation
 
 /// A section of the overview. The user orders and hides them; see `AppStore.overviewPlacements`.
 enum OverviewWidget: String, CaseIterable, Identifiable {
-    case standup, time, chart, calendar, breakdown, sessions, goals, due, unlogged, bySpace, topTasks, board
+    case standup, time, review, chart, calendar, breakdown, sessions, goals, due, unlogged, bySpace, topTasks, board
 
     var id: String { rawValue }
 
@@ -11,6 +11,7 @@ enum OverviewWidget: String, CaseIterable, Identifiable {
         switch self {
         case .standup: "Daily standup"
         case .time: "Time"
+        case .review: "Review"
         case .chart: "Chart"
         case .calendar: "Calendar"
         case .breakdown: "Where the time went"
