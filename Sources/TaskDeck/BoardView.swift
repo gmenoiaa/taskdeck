@@ -318,6 +318,12 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         reviewingPullRequest = true
     }
 
+    private func showReview(_ link: String?) {
+        guard let link else { return }
+        store.openReview = nil
+        reviewPullRequest(link.isEmpty ? nil : link)
+    }
+
     private func newTask() {
         newTask(goal: tab == "goals" ? UUID(uuidString: goalSelected).flatMap { store.goal($0)?.id } : nil)
     }
@@ -515,6 +521,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             if let id = UUID(uuidString: savedSpace), store.project(id) != nil { filter = id }
             // Asked for while the window was closed, by the menu bar or a notification.
             showStandup(store.openStandup)
+            showReview(store.openReview)
         }
         .onChange(of: store.openStandup) { _, id in showStandup(id) }
         .onChange(of: filter) { _, new in savedSpace = new?.uuidString ?? "" }
@@ -639,11 +646,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         .sheet(isPresented: $reviewingPullRequest) {
             CodeReviewView(space: filter, link: reviewLink).environment(store)
         }
-        .onChange(of: store.droppedPullRequest) { _, link in
-            guard let link else { return }
-            store.droppedPullRequest = nil
-            reviewPullRequest(link)
-        }
+        .onChange(of: store.openReview) { _, link in showReview(link) }
         .sheet(item: $standup) { target in
             StandupView(spaceId: target.id).environment(store)
         }
