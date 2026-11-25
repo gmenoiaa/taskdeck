@@ -197,15 +197,27 @@ extension TicketFetcher {
             let repo = "\(gh.path[0])/\(gh.path[1])"
             return [CreateTarget(id: repo, name: repo, types: [])]
         }
-        let org = gh.path.first ?? project.githubOrg.flatMap { $0.isEmpty ? nil : $0 }
-        let list = org.map { "\(gh.api)/orgs/\($0)/repos?sort=updated&per_page=100" }
-            ?? "\(gh.api)/user/repos?sort=updated&per_page=100"
+        let owner = gh.path.first ?? project.githubOrg.flatMap { $0.isEmpty ? nil : $0 }
+        // The base URL may name a personal account as well as an organisation, and /orgs/ answers
+        // 404 for an account. The token's own list covers an account's private repositories too.
+        var list = "\(gh.api)/user/repos?sort=updated&per_page=100"
+        if let owner {
+            let info = try? await HTTP.getJSON("\(gh.api)/users/\(owner)", headers: gh.headers) as? [String: Any]
+            if (info?["type"] as? String) == "Organization" {
+                list = "\(gh.api)/orgs/\(owner)/repos?sort=updated&per_page=100"
+            } else {
+                list += "&affiliation=owner,collaborator"
+            }
+        }
         var names: [String] = []
         for page in 1...3 {
             let rows = try await HTTP.getJSON("\(list)&page=\(page)", headers: gh.headers) as? [[String: Any]] ?? []
             names += rows.filter { ($0["archived"] as? Bool) != true && ($0["has_issues"] as? Bool) != false }
                 .compactMap { $0["full_name"] as? String }
             if rows.count < 100 { break }
+        }
+        if let owner {
+            names = names.filter { $0.lowercased().hasPrefix(owner.lowercased() + "/") }
         }
         // Most recently updated first: the repository wanted is usually one of those.
         return names.map { CreateTarget(id: $0, name: $0, types: []) }

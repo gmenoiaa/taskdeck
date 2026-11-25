@@ -120,6 +120,7 @@ struct CreateTicketView: View {
     private var project: Project? { store.project(task?.projectId) }
     private var kind: TrackerKind { project?.kind ?? .other }
     private var targetLabel: String { kind == .github ? "Repository" : "Project" }
+    private var targetPlural: String { kind == .github ? "repositories" : "projects" }
 
     private var ready: Bool {
         target != nil && !title.trimmingCharacters(in: .whitespaces).isEmpty && !sending && !loadingTypes
@@ -205,7 +206,7 @@ struct CreateTicketView: View {
             }
             if targets.isEmpty { loadError = "\(project.kind.label) lists no \(targetLabel.lowercased()) where you can create a ticket." }
         } catch {
-            loadError = "Could not read the \(targetLabel.lowercased())s: \(error.localizedDescription)"
+            loadError = "Could not read the \(targetPlural): \(error.localizedDescription)"
         }
         loading = false
     }
