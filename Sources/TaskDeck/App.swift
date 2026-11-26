@@ -69,6 +69,12 @@ struct MenuBarLabel: View {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
+        // The same for a task asked for by a click on its reminder.
+        .onChange(of: store.openTask) { _, id in
+            guard id != nil else { return }
+            openWindow(id: "main")
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 }
 

@@ -243,6 +243,17 @@ struct TaskNote: Identifiable, Codable, Hashable {
     var at = Date()
 }
 
+/// A moment the user asked to be told about a task. Kept on this Mac only: the note is not
+/// posted to the tracker and no AI feature reads it.
+struct TaskReminder: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var at: Date
+    var note = ""
+    /// When it came due and was said. A fired reminder stays, in the bell's list, until it is
+    /// opened, cleared or snoozed.
+    var firedAt: Date?
+}
+
 struct TaskItem: Identifiable, Codable, Hashable {
     var id = UUID()
     var projectId: UUID?
@@ -276,6 +287,10 @@ struct TaskItem: Identifiable, Codable, Hashable {
     /// The ticket's own due date in its tracker, as last seen.
     var remoteDue: Date?
     var due: Date? { dueDate ?? remoteDue }
+    /// Reminders set for this task. Optional so older files still load; use `reminderList`.
+    var reminders: [TaskReminder]?
+    /// The reminders, earliest first.
+    var reminderList: [TaskReminder] { (reminders ?? []).sorted { $0.at < $1.at } }
     /// Last plain-language explanation of the ticket written by Claude (Markdown).
     var explanation: String?
     /// Agent sessions started in Orca for this task, oldest first. Optional so older files still load.
