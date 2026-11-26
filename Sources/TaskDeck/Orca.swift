@@ -394,6 +394,117 @@ enum Orca {
                                  mergedAt: date("mergedAt"), closedAt: date("closedAt"))
     }
 
+    /// What people said on a pull request: reviews, comments and open review threads by someone
+    /// other than the developer's own GitHub accounts and the pull request's author. Bots (CI,
+    /// code scanners, review apps) are left out: the agent deals with them, and they comment on
+    /// every push.
+    struct PullRequestFeedback: Hashable {
+        struct Item: Hashable {
+            enum Kind: Hashable { case approved, changesRequested, comment }
+            let id: String
+            let kind: Kind
+            let author: String
+            let body: String
+            let at: Date
+        }
+        let number: Int
+        /// "open", "merged" or "closed".
+        let state: String
+        let approved: Bool
+        let changesRequested: Bool
+        /// Oldest first.
+        let items: [Item]
+        /// The last push, or the developer's last comment or reply, whichever is later.
+        let answeredAt: Date?
+
+        /// What came after the last push or reply: what the developer has not acted on yet.
+        var waiting: [Item] { items.filter { $0.at > (answeredAt ?? .distantPast) } }
+    }
+
+    /// The GitHub logins of the accounts gh is signed in to, the developer's own. Empty when gh
+    /// is missing or did not answer.
+    static func githubLogins() async -> Set<String> {
+        guard let gh = ghExecutable, let reply = try? await exec(gh, ["auth", "status", "--json", "hosts"], timeout: 30),
+              let root = (try? JSONSerialization.jsonObject(with: reply.out)) as? [String: Any],
+              let hosts = root["hosts"] as? [String: Any] else { return [] }
+        let accounts = hosts.values.compactMap { $0 as? [[String: Any]] }.flatMap { $0 }
+        return Set(accounts.compactMap { ($0["login"] as? String)?.lowercased() })
+    }
+
+    private static let feedbackQuery = """
+    query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+      number state reviewDecision author { login }
+      commits(last: 1) { nodes { commit { committedDate } } }
+      reviews(last: 50) { nodes { id state body submittedAt author { __typename login } } }
+      comments(last: 50) { nodes { id body createdAt author { __typename login } } }
+      reviewThreads(last: 80) { nodes { isResolved comments(last: 1) { nodes { id body createdAt author { __typename login } } } } }
+    } } }
+    """
+
+    /// Reads a pull request's reviews and comments. `mine` holds the developer's GitHub logins,
+    /// lowercased. Nil when gh is missing or GitHub did not answer.
+    static func pullRequestFeedback(_ url: URL, account: String?, mine: Set<String>) async -> PullRequestFeedback? {
+        // github.com/owner/name/pull/123
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard let gh = ghExecutable, parts.count >= 4, parts[2] == "pull", let number = Int(parts[3]) else { return nil }
+        let args = ["api", "graphql", "-F", "owner=\(parts[0])", "-F", "name=\(parts[1])", "-F", "number=\(number)",
+                    "-f", "query=\(feedbackQuery)"]
+        guard let reply = await runGH(gh, args, account: account), reply.status == 0,
+              let root = (try? JSONSerialization.jsonObject(with: reply.out)) as? [String: Any],
+              let pr = ((root["data"] as? [String: Any])?["repository"] as? [String: Any])?["pullRequest"] as? [String: Any],
+              let state = pr["state"] as? String else { return nil }
+        let iso = ISO8601DateFormatter()
+        func nodes(_ object: Any?) -> [[String: Any]] { (object as? [String: Any])?["nodes"] as? [[String: Any]] ?? [] }
+        let author = ((pr["author"] as? [String: Any])?["login"] as? String)?.lowercased()
+        let me = mine.union([author].compactMap { $0 })
+
+        var items: [PullRequestFeedback.Item] = []
+        var answered = nodes(pr["commits"]).compactMap { (($0["commit"] as? [String: Any])?["committedDate"] as? String).flatMap(iso.date) }.max()
+        // Everything written, by whom and when: the developer's own count as answers.
+        func take(_ node: [String: Any], date key: String, kind: PullRequestFeedback.Item.Kind?) {
+            guard let who = node["author"] as? [String: Any], let login = who["login"] as? String,
+                  let at = (node[key] as? String).flatMap(iso.date), let id = node["id"] as? String else { return }
+            if me.contains(login.lowercased()) {
+                answered = max(answered ?? at, at)
+                return
+            }
+            guard who["__typename"] as? String == "User", let kind else { return }
+            items.append(.init(id: id, kind: kind, author: login,
+                               body: (node["body"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines), at: at))
+        }
+        // Each reviewer's last verdict; GitHub lists reviews oldest first.
+        var decisions: [String: String] = [:]
+        for review in nodes(pr["reviews"]) {
+            let body = (review["body"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let kind: PullRequestFeedback.Item.Kind?
+            switch review["state"] as? String {
+            case "APPROVED": kind = .approved
+            case "CHANGES_REQUESTED": kind = .changesRequested
+            // A review with no text only wraps line comments, which come with their threads.
+            case "COMMENTED": kind = body.isEmpty ? nil : .comment
+            default: kind = nil
+            }
+            take(review, date: "submittedAt", kind: kind)
+            if let state = review["state"] as? String, state == "APPROVED" || state == "CHANGES_REQUESTED",
+               let login = (review["author"] as? [String: Any])?["login"] as? String, !me.contains(login.lowercased()) {
+                decisions[login] = state
+            }
+        }
+        for comment in nodes(pr["comments"]) { take(comment, date: "createdAt", kind: .comment) }
+        // A thread counts by its last comment, and only while it is open: a resolved thread, or
+        // one whose last word is the developer's, is answered.
+        for thread in nodes(pr["reviewThreads"]) where thread["isResolved"] as? Bool != true {
+            for comment in nodes(thread["comments"]) { take(comment, date: "createdAt", kind: .comment) }
+        }
+        // GitHub's own verdict where the repository requires reviews; otherwise each reviewer's last say.
+        let decision = pr["reviewDecision"] as? String
+        let changes = decision == "CHANGES_REQUESTED" || (decision == nil && decisions.values.contains("CHANGES_REQUESTED"))
+        let approved = !changes && (decision == "APPROVED" || (decision == nil && decisions.values.contains("APPROVED")))
+        return PullRequestFeedback(number: pr["number"] as? Int ?? number, state: state.lowercased(),
+                                   approved: approved, changesRequested: changes,
+                                   items: items.sorted { $0.at < $1.at }, answeredAt: answered)
+    }
+
     /// "~/.claude-work" as a full path. Nil when it is not an existing directory.
     static func resolvedHome(_ typed: String) -> String? { resolvedDirectory(typed) }
 

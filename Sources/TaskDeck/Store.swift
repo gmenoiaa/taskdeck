@@ -37,6 +37,10 @@ final class AppStore {
     /// Pull requests whose end (merged or closed) was already reported, as "worktree|kind". Saved:
     /// after a launch the app learns again that an old one is merged, and that is not news.
     var announcedPullRequests: Set<String> = []
+    /// For each open pull request's page, when its newest review or comment was written, as of the
+    /// last announcement. Saved, so a launch does not announce old feedback again. A pull request
+    /// first seen with feedback on it takes note of it without a banner.
+    var pullRequestFeedbackSeen: [String: Date] = [:]
     /// What each space's tracker lists as assigned to me, as of the last look (kept in `assigned.json`).
     var assignedTickets: [UUID: [RemoteTicket]] = [:]
     /// Why a space's tracker could not be read at the last look.
@@ -112,6 +116,11 @@ final class AppStore {
     /// a standup only; a merged or closed one is not asked about again.
     @ObservationIgnored private var pullRequestDetails: [URL: Orca.PullRequestDetail] = [:]
     @ObservationIgnored private var pullRequestAsked: [String: Date] = [:]
+    /// Reviews and comments on the sessions' open pull requests, by the pull request's page.
+    @ObservationIgnored private var pullRequestFeedback: [URL: Orca.PullRequestFeedback] = [:]
+    @ObservationIgnored private var feedbackAsked: [URL: Date] = [:]
+    /// The developer's own GitHub logins, read from gh at most every hour.
+    @ObservationIgnored private var githubLogins: (logins: Set<String>, at: Date)?
     @ObservationIgnored private var orcaRepos: [Orca.Repo] = []
     @ObservationIgnored private var orcaReposAt = Date.distantPast
     @ObservationIgnored private var sessionLoop: Task<Void, Never>?
@@ -140,6 +149,7 @@ final class AppStore {
         var knownAssigned: [String]?
         var clearedWaiting: [String]?
         var announcedPullRequests: [String]?
+        var pullRequestFeedbackSeen: [String: Date]?
         var ignoredAssigned: [String]?
         var unloggedRemindedAt: Date?
         var goals: [Goal]?
@@ -366,6 +376,7 @@ final class AppStore {
             knownAssigned = snap.knownAssigned.map(Set.init)
             clearedWaiting = Set(snap.clearedWaiting ?? [])
             announcedPullRequests = Set(snap.announcedPullRequests ?? [])
+            pullRequestFeedbackSeen = snap.pullRequestFeedbackSeen ?? [:]
             ignoredAssigned = Set(snap.ignoredAssigned ?? [])
             unloggedRemindedAt = snap.unloggedRemindedAt
             goals = snap.goals ?? []
@@ -400,6 +411,7 @@ final class AppStore {
                             knownAssigned: knownAssigned.map { $0.sorted() },
                             clearedWaiting: clearedWaiting.isEmpty ? nil : clearedWaiting.sorted(),
                             announcedPullRequests: announcedPullRequests.isEmpty ? nil : announcedPullRequests.sorted(),
+                            pullRequestFeedbackSeen: pullRequestFeedbackSeen.isEmpty ? nil : pullRequestFeedbackSeen,
                             ignoredAssigned: ignoredAssigned.isEmpty ? nil : ignoredAssigned.sorted(), unloggedRemindedAt: unloggedRemindedAt,
                             goals: goals.isEmpty ? nil : goals,
                             standups: standups.isEmpty ? nil : Self.byString(standups),
@@ -882,6 +894,54 @@ final class AppStore {
         await readTranscripts(trees)
         publish(trees)
         if await askGitHub(trees, limit: force ? 40 : 3) { publish(trees) }
+        await askPullRequestFeedback(limit: force ? 40 : 3)
+    }
+
+    /// Reads reviews and comments on the sessions' open pull requests, a few per refresh and each
+    /// at most every five minutes, and announces what is new.
+    private func askPullRequestFeedback(limit: Int) async {
+        var open: [(url: URL, task: TaskItem, account: String?)] = []
+        for task in tasks where !task.archived {
+            for session in sessions(of: task) {
+                guard let status = status(of: session), status.kind == .prOpen, let url = status.prURL,
+                      !open.contains(where: { $0.url == url }) else { continue }
+                open.append((url, task, session.githubAccount ?? project(task.projectId)?.githubAccount))
+            }
+        }
+        // Pull requests that are no longer open are forgotten, so the saved list does not grow.
+        let pages = Set(open.map(\.url.absoluteString))
+        var changed = false
+        if sessionStatuses != nil, pullRequestFeedbackSeen.keys.contains(where: { !pages.contains($0) }) {
+            pullRequestFeedbackSeen = pullRequestFeedbackSeen.filter { pages.contains($0.key) }
+            changed = true
+        }
+        let due = open.filter { feedbackAsked[$0.url].map { Date().timeIntervalSince($0) >= 300 } ?? true }
+        if !due.isEmpty, Date().timeIntervalSince(githubLogins?.at ?? .distantPast) > 3600 {
+            githubLogins = (await Orca.githubLogins(), Date())
+        }
+        for item in due.prefix(limit) {
+            feedbackAsked[item.url] = Date()
+            // A failed question keeps what was known.
+            guard let feedback = await Orca.pullRequestFeedback(item.url, account: item.account,
+                                                                mine: githubLogins?.logins ?? []) else { continue }
+            pullRequestFeedback[item.url] = feedback
+            let key = item.url.absoluteString
+            if let seen = pullRequestFeedbackSeen[key] {
+                let fresh = feedback.items.filter { $0.at > seen }
+                guard let newest = fresh.last else { continue }
+                announceFeedback(fresh, on: feedback, task: item.task)
+                pullRequestFeedbackSeen[key] = newest.at
+            } else {
+                pullRequestFeedbackSeen[key] = feedback.items.last?.at ?? .distantPast
+            }
+            changed = true
+        }
+        if changed { save() }
+    }
+
+    /// Reviews and comments on a session's open pull request, as last read from GitHub.
+    func feedback(of session: AgentSession) -> Orca.PullRequestFeedback? {
+        status(of: session)?.prURL.flatMap { pullRequestFeedback[$0] }
     }
 
     /// Matches worktrees created in Orca to tasks: same space, and the ticket reference in the name or branch.

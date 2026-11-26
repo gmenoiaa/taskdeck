@@ -7,7 +7,8 @@ import UserNotifications
 struct NotificationSettings: Codable, Equatable {
     /// An agent stopped, opened a pull request, or the queue could not start one.
     var sessions = true
-    /// A pull request of one of the board's sessions was merged or closed.
+    /// A pull request of one of the board's sessions was merged or closed, approved, or someone
+    /// reviewed or commented on it.
     var pullRequests = true
     /// A ticket was assigned to me in a tracker.
     var assigned = true
@@ -202,6 +203,27 @@ extension AppStore {
             announcedPullRequests = now
             save()
         }
+    }
+
+    /// New reviews or comments on a session's pull request, in one banner: the weightiest first
+    /// (changes asked for, then an approval, then a comment), with who wrote it and how it starts.
+    func announceFeedback(_ fresh: [Orca.PullRequestFeedback.Item], on feedback: Orca.PullRequestFeedback, task: TaskItem) {
+        guard notify.pullRequests, !fresh.isEmpty else { return }
+        let lead = fresh.last { $0.kind == .changesRequested } ?? fresh.last { $0.kind == .approved } ?? fresh.last!
+        let title: String
+        switch lead.kind {
+        case .changesRequested: title = "Changes requested on #\(feedback.number)"
+        case .approved: title = "Pull request #\(feedback.number) approved"
+        case .comment: title = "New comment on #\(feedback.number)"
+        }
+        // HTML comments are what review apps hide their markers in; the rest is read as plain text.
+        let text = lead.body.replacingOccurrences(of: "(?s)<!--.*?-->", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\*\\*|__|`|(?m)^#+\\s*", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        var body = text.isEmpty ? lead.author : "\(lead.author): \(text.count > 200 ? String(text.prefix(199)) + "…" : text)"
+        if fresh.count > 1 { body += " (and \(fresh.count - 1) more)" }
+        Notifier.send(title: title, subtitle: label(task), body: body)
     }
 
     /// The two reminders about time: stopped time not logged at the end of the day, and a timer that

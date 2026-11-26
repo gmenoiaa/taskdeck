@@ -190,7 +190,7 @@ private struct NotificationSettingsTab: View {
             Section("Tickets and agents") {
                 Toggle("Ticket assigned to me", isOn: $store.notify.assigned)
                     .help("Checked every 15 minutes while the app is open. Tickets you ignored are not reported.")
-                Toggle("Pull request merged or closed", isOn: $store.notify.pullRequests)
+                Toggle("Pull request reviewed, commented on, merged or closed", isOn: $store.notify.pullRequests)
                 Toggle("Agent sessions", isOn: $store.notify.sessions)
                     .help("When an agent stops and it is your turn, when it opens a pull request, and when the agent queue cannot start a task or needs you to pick a repository.")
                 Text("Tickets are checked every 15 minutes while the app is open. Agent sessions: when it is your turn, a pull request opens, or the queue needs you.")

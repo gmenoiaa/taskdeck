@@ -21,7 +21,7 @@ enum ReviewDetail: String, CaseIterable, Identifiable {
         case .status:
             return "Sends the ticket reference, its column, dates and tracker status, the state of its sessions and pull requests, and when someone last commented. No titles, no names, no comment text, none of your notes and nothing an agent wrote."
         case .ticket:
-            return "Also sends the title, the assignee, the last comments on the ticket with their authors, your notes on the task, the end of the agent's last answer and what it left running in the background."
+            return "Also sends the title, the assignee, the last comments on the ticket with their authors, your notes on the task, reviewers' comments on its pull request, the end of the agent's last answer and what it left running in the background."
         case .full:
             return "Also sends the agent's whole last answer, what you last typed to it, and what its terminal shows. A terminal can show code and customer data."
         }
@@ -246,9 +246,38 @@ struct ReviewFacts {
             }
             if let open = statuses.first(where: { $0.1.kind == .prOpen }) {
                 let number = open.1.prNumber.map { " #\($0)" } ?? ""
-                findings.append(Finding(urgency: 3, text: open.1.prDraft
-                                        ? "Pull request\(number) is still a draft."
-                                        : "Pull request\(number) is open for review.", action: "open_pr"))
+                let feedback = store.feedback(of: open.0)
+                var said = false
+                if let feedback, feedback.changesRequested {
+                    // GitHub keeps "changes requested" until the reviewer looks again, also after
+                    // the fix was pushed: then it is the reviewer's move, not the developer's.
+                    let request = feedback.items.last { $0.kind == .changesRequested }
+                    let who = request?.author
+                    if let request, request.at <= feedback.answeredAt ?? .distantPast {
+                        findings.append(Finding(urgency: 3, text: "Changes asked for on pull request\(number) were answered; it waits for \(who ?? "the reviewer") to look again.",
+                                                action: "open_pr", sent: "Changes asked for on pull request\(number) were answered; it waits for \(who.map(standIn) ?? "the reviewer") to look again."))
+                    } else {
+                        findings.append(Finding(urgency: 1, text: "\(who ?? "A reviewer") asked for changes on pull request\(number).",
+                                                action: "open_pr", sent: "\(who.map(standIn) ?? "A reviewer") asked for changes on pull request\(number)."))
+                    }
+                    said = true
+                } else if feedback?.approved == true {
+                    findings.append(Finding(urgency: 2, text: "Pull request\(number) is approved.", action: "open_pr"))
+                    said = true
+                }
+                let commenters = (feedback?.waiting ?? []).filter { $0.kind == .comment }.map(\.author)
+                    .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+                if !commenters.isEmpty {
+                    findings.append(Finding(urgency: 2, text: "\(commenters.joined(separator: ", ")) commented on pull request\(number) since the last push or reply.",
+                                            action: "open_pr",
+                                            sent: "\(commenters.map(standIn).joined(separator: ", ")) commented on pull request\(number) since the last push or reply."))
+                    said = true
+                }
+                if !said {
+                    findings.append(Finding(urgency: 3, text: open.1.prDraft
+                                            ? "Pull request\(number) is still a draft."
+                                            : "Pull request\(number) is open for review.", action: "open_pr"))
+                }
             }
             // An agent waiting on a download or a build it started has not stopped working.
             if !statuses.isEmpty, statuses.allSatisfy({ $0.1.kind == .idle && $0.1.running.isEmpty }),
@@ -327,6 +356,31 @@ struct ReviewFacts {
                         + " and carries on by itself when \(count == 1 ? "it finishes" : "they finish")"
                 }
                 lines.append(line)
+                // What reviewers said: the verdict and who wrote since the last push or reply at
+                // every level, names as stand-ins at the status-only level; the text where it may go.
+                if status.kind == .prOpen, let feedback = store.feedback(of: session) {
+                    let name = { (login: String) in detail == .status ? standIn(login) : login }
+                    if feedback.changesRequested {
+                        let request = feedback.items.last { $0.kind == .changesRequested }
+                        let answered = request.map { $0.at <= feedback.answeredAt ?? .distantPast } ?? false
+                        lines.append("Pull request review: changes requested\(request.map { " by \(name($0.author))" } ?? "")"
+                                     + (answered ? ", answered since with a push or reply" : ", not answered yet"))
+                    } else if feedback.approved {
+                        lines.append("Pull request review: approved")
+                    }
+                    let waiting = feedback.waiting
+                    if !waiting.isEmpty {
+                        let names = waiting.map { name($0.author) }.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+                        lines.append("Reviews and comments on the pull request since the last push or reply: \(waiting.count), from \(names.joined(separator: ", "))")
+                        if detail != .status {
+                            let length = detail == .full ? 1000 : 500
+                            for item in waiting.suffix(3) where !item.body.isEmpty {
+                                lines.append("\(item.author), \(item.at.formatted(date: .abbreviated, time: .shortened)):\n"
+                                             + Self.quoted(Self.clip(item.body, length, fromEnd: false)))
+                            }
+                        }
+                    }
+                }
                 if detail != .status, status.kind != .working, !status.running.isEmpty {
                     lines.append("What it left running, as the agent described it:\n"
                                  + Self.quoted(status.running.map(\.what).joined(separator: "\n")))
@@ -449,6 +503,10 @@ struct ReviewFacts {
     work, such as a download or a build, and goes on by itself when it ends. It has not stopped: \
     do not tell the developer to restart it or check on it. Give an item for it only when its \
     block shows a problem, or the command has been running for days.
+    - Reviews and comments on a pull request are by people, never bots. Those written since the \
+    last push or reply are feedback the developer, or the agent, has not acted on: say who wrote \
+    and, when the text is given, what they ask. An approved pull request is ready to merge unless \
+    its block says otherwise.
     - Give an item only for a task that needs something from the developer or is at risk: an agent \
     that asks a question or waits for an approval, an agent that says it is done but left no pull \
     request, a merged pull request whose task is still open, an agent that drifted from the ticket \
