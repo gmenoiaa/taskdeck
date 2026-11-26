@@ -217,6 +217,11 @@ private struct NotificationSettingsTab: View {
                 Text("The meeting time, the days and how early to remind are set per space in Settings → Spaces.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Task reminders") {
+                Toggle("When a task's reminder is due", isOn: $store.notify.reminders)
+                Text("Set from a card's menu or the task's details. One that comes due while the Mac is asleep or locked is sent when you are back. With this off, a due reminder still shows in the bell's list.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Dock badge") {
                 Picker("Shows", selection: $store.notify.badge) {
                     Text("Things waiting for me").tag(NotificationSettings.DockBadge.waiting)
@@ -226,7 +231,7 @@ private struct NotificationSettingsTab: View {
                 if store.notify.badge == .waiting {
                     Toggle("Count tickets assigned to me that are not on the board", isOn: $store.notify.badgeAssigned)
                     Toggle("Count open pull requests", isOn: $store.notify.badgePullRequests)
-                    Text("Always counted: sessions where it is your turn, and queued tasks that need a repository or did not start. Pull requests are the board's sessions', without drafts.")
+                    Text("Always counted: sessions where it is your turn, task reminders that came due, and queued tasks that need a repository or did not start. Pull requests are the board's sessions', without drafts.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

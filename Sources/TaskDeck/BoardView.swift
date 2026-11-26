@@ -92,6 +92,17 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         standup = StandupTarget(id: id)
     }
 
+    /// Shows a task asked for from outside the window (a click on its reminder), and takes the request.
+    private func showTask(_ id: UUID?) {
+        guard let id else { return }
+        store.openTask = nil
+        guard let task = store.task(id) else { return }
+        tab = "board"
+        if filter != nil, filter != task.projectId { filter = task.projectId }
+        selected = id
+        openCard(task)
+    }
+
     private var filterMenu: some View {
         Menu {
             ForEach(BoardFilter.allCases) { item in
@@ -152,6 +163,12 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             return
         }
         guard let task = item.task else { return }
+        // Opening a reminder is answering it: the task is shown and the reminder is done.
+        if item.kind == .reminder {
+            store.clearWaiting([item.id])
+            showTask(task.id)
+            return
+        }
         tab = "board"
         if filter != nil, filter != task.projectId { filter = task.projectId }
         search = task.ref.isEmpty ? task.title : task.ref
@@ -522,8 +539,10 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
             // Asked for while the window was closed, by the menu bar or a notification.
             showStandup(store.openStandup)
             showReview(store.openReview)
+            showTask(store.openTask)
         }
         .onChange(of: store.openStandup) { _, id in showStandup(id) }
+        .onChange(of: store.openTask) { _, id in showTask(id) }
         .onChange(of: filter) { _, new in savedSpace = new?.uuidString ?? "" }
         // The window keeps its name for Mission Control and the Window menu; the toolbar has no room for it.
         .modifier(NoToolbarTitle())
@@ -794,12 +813,13 @@ private struct WaitingList: View {
         case .repository: return "questionmark.folder"
         case .notStarted: return "exclamationmark.triangle.fill"
         case .assigned: return "tray.and.arrow.down"
+        case .reminder: return "bell.fill"
         }
     }
 
     private func color(_ kind: AppStore.WaitingItem.Kind) -> Color {
         switch kind {
-        case .yourTurn, .repository: return .orange
+        case .yourTurn, .repository, .reminder: return .orange
         case .notStarted: return .red
         case .pullRequest, .assigned: return .secondary
         }
@@ -1236,6 +1256,7 @@ struct TaskCard: View {
     @State private var startingSession = false
     @State private var creatingTicket = false
     @State private var pickingDue = false
+    @State private var pickingReminder = false
     @State private var removingWorktrees: [TaskWorktree] = []
 
     /// The card's pills, each in words: time not logged, due date, missing estimate, goal, agent
@@ -1266,6 +1287,11 @@ struct TaskCard: View {
             Button { pickingDue = true } label: { DueChip(date: due) }
                 .buttonStyle(.plain)
                 .help(Due.help(task) + " — click to change")
+        }
+        if let reminder = Reminders.shown(task) {
+            Button { pickingReminder = true } label: { ReminderChip(reminder: reminder) }
+                .buttonStyle(.plain)
+                .help(Reminders.help(task) + " — click to change")
         }
         // Not on finished work: an estimate nobody set no longer needs setting.
         if let gap = task.estimateGap, store.role(of: task.status) != .done {
@@ -1535,6 +1561,7 @@ struct TaskCard: View {
             }
             Divider()
             Menu("Due date") { DueMenuItems(task: task) { pickingDue = true } }
+            Menu("Remind me") { ReminderMenuItems(task: task) { pickingReminder = true } }
             if !store.goals.isEmpty {
                 Menu("Goal") {
                     // Finished goals are left out, except the one the task is already in.
@@ -1562,6 +1589,9 @@ struct TaskCard: View {
         }
         .popover(isPresented: $pickingDue, arrowEdge: .trailing) {
             DuePicker(taskId: task.id).environment(store)
+        }
+        .popover(isPresented: $pickingReminder, arrowEdge: .trailing) {
+            ReminderPicker(taskId: task.id).environment(store)
         }
         .sheet(isPresented: $startingSession) {
             // The ticket as last loaded in the details, when there is a copy: the prompt is

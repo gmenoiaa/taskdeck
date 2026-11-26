@@ -233,6 +233,8 @@ struct TaskEditor: View {
             task.status = live.status
             task.order = live.order
             task.dueDate = live.dueDate
+            // A reminder may have come due, or been snoozed from its banner, meanwhile.
+            task.reminders = live.reminders
             if hasDetails { task.noteList = live.noteList }
             let before = Dictionary(uniqueKeysWithValues: original.entries.map { ($0.id, $0) })
             let draft = Dictionary(uniqueKeysWithValues: task.entries.map { ($0.id, $0) })

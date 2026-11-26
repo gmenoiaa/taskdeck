@@ -36,6 +36,8 @@ struct NotificationSettings: Codable, Equatable {
     var sound = ""
     /// Before a space's daily standup, by the minutes set on that space.
     var standup = true
+    /// A task's reminder came due.
+    var reminders = true
 
     enum DockBadge: String, Codable { case waiting, timer, none }
 
@@ -61,6 +63,7 @@ struct NotificationSettings: Codable, Equatable {
         autoStartInProgress = try c.decodeIfPresent(Bool.self, forKey: .autoStartInProgress) ?? true
         sound = try c.decodeIfPresent(String.self, forKey: .sound) ?? ""
         standup = try c.decodeIfPresent(Bool.self, forKey: .standup) ?? true
+        reminders = try c.decodeIfPresent(Bool.self, forKey: .reminders) ?? true
     }
 }
 
@@ -72,7 +75,7 @@ extension AppStore {
 
     /// One thing waiting for me: what the Dock badge counts and the toolbar's list shows.
     struct WaitingItem: Identifiable {
-        enum Kind { case yourTurn, pullRequest, repository, notStarted, assigned }
+        enum Kind { case yourTurn, pullRequest, repository, notStarted, assigned, reminder }
         let id: String
         let kind: Kind
         /// Nil for a ticket assigned to me that is not on the board: it has no task yet.
@@ -91,7 +94,14 @@ extension AppStore {
     /// Takes items off the list without dealing with them. Each comes back the next time it
     /// happens: a session that works again and stops again, a queue start that fails again.
     func clearWaiting(_ ids: [String]) {
-        clearedWaiting.formUnion(ids)
+        // A reminder does not happen again, so clearing one removes it rather than noting it.
+        let reminders = Set(ids.filter { $0.hasPrefix(Self.reminderPrefix) }.map { String($0.dropFirst(Self.reminderPrefix.count)) })
+        if !reminders.isEmpty {
+            for i in tasks.indices where tasks[i].reminders != nil {
+                tasks[i].reminders?.removeAll { reminders.contains($0.id.uuidString) }
+            }
+        }
+        clearedWaiting.formUnion(ids.filter { !$0.hasPrefix(Self.reminderPrefix) })
         save()
     }
 
@@ -116,6 +126,11 @@ extension AppStore {
                 items.append(note == TaskItem.needsRepository
                     ? WaitingItem(id: "repo-\(task.id)", kind: .repository, task: task, detail: "Pick a repository")
                     : WaitingItem(id: "queue-\(task.id)", kind: .notStarted, task: task, detail: "Agent not started: \(note)"))
+            }
+            for reminder in task.reminderList where reminder.firedAt != nil {
+                items.append(WaitingItem(id: Self.reminderPrefix + reminder.id.uuidString, kind: .reminder, task: task,
+                                         detail: "Reminder from \(Reminders.label(reminder.at))",
+                                         note: reminder.note.isEmpty ? nil : reminder.note))
             }
             for session in sessions(of: task) {
                 guard let status = status(of: session) else { continue }
@@ -145,7 +160,9 @@ extension AppStore {
         waitingItems.filter { $0.kind != .assigned || notify.badgeAssigned }.count
     }
 
-    private func label(_ task: TaskItem) -> String {
+    static let reminderPrefix = "reminder-"
+
+    func label(_ task: TaskItem) -> String {
         let text = "\(task.displayRef) \(task.title)".trimmingCharacters(in: .whitespaces)
         return text.isEmpty ? "(untitled)" : text
     }
@@ -303,6 +320,18 @@ enum Notifier {
                     Task { @MainActor in NSWorkspace.shared.open(link) }
                 }
             }
+            if let task = (info["reminderTask"] as? String).flatMap(UUID.init(uuidString:)),
+               let id = (info["reminder"] as? String).flatMap(UUID.init(uuidString:)) {
+                let snooze: Notifier.Snooze?
+                switch response.actionIdentifier {
+                case UNNotificationDefaultActionIdentifier: snooze = nil
+                case Notifier.snoozeHourAction: snooze = .hour
+                case Notifier.snoozeTomorrowAction: snooze = .tomorrow
+                // Dismissed: it stays in the bell's list.
+                default: completionHandler(); return
+                }
+                Task { @MainActor in Notifier.onReminder?(task, id, snooze) }
+            }
             if response.actionIdentifier == Notifier.startAction,
                let id = (info["task"] as? String).flatMap(UUID.init(uuidString:)), let since = info["since"] as? Double {
                 Task { @MainActor in Notifier.onStart?(id, Date(timeIntervalSince1970: since)) }
@@ -336,6 +365,12 @@ enum Notifier {
     private static let startCategory = "no-timer"
     /// Set by the store: the reminder's "Start Timer" button.
     @MainActor static var onStart: ((UUID, Date) -> Void)?
+    enum Snooze { case hour, tomorrow }
+    static let snoozeHourAction = "snooze-hour"
+    static let snoozeTomorrowAction = "snooze-tomorrow"
+    private static let reminderCategory = "reminder"
+    /// Set by the store: a task reminder was clicked (no snooze) or put off with one of its buttons.
+    @MainActor static var onReminder: ((UUID, UUID, Snooze?) -> Void)?
     /// Set by the store: a click on a standup reminder opens that space's update.
     @MainActor static var onStandup: ((UUID) -> Void)?
     /// Set by the store: a click on a session's banner opens it in Orca, by its worktree id.
@@ -349,15 +384,20 @@ enum Notifier {
         // its Dock badge unless badges were part of the request.
         center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
         let start = UNNotificationAction(identifier: startAction, title: "Start Timer", options: [])
+        let hour = UNNotificationAction(identifier: snoozeHourAction, title: "Snooze 1 Hour", options: [])
+        let tomorrow = UNNotificationAction(identifier: snoozeTomorrowAction, title: "Tomorrow Morning", options: [])
         center.setNotificationCategories([
-            UNNotificationCategory(identifier: startCategory, actions: [start], intentIdentifiers: [])])
+            UNNotificationCategory(identifier: startCategory, actions: [start], intentIdentifiers: []),
+            UNNotificationCategory(identifier: reminderCategory, actions: [hour, tomorrow], intentIdentifiers: [])])
     }
 
+    /// With `reminder`, it carries the snooze buttons and a click opens that task.
     /// With `startTask`, the notification carries a "Start Timer" button for that task, counting
     /// from `since`. A click opens the standup, else the agent session (a worktree id) in Orca,
     /// else the link; with none of them it only brings the app forward.
     static func send(title: String, subtitle: String? = nil, body: String, startTask: UUID? = nil,
-                     since: Date? = nil, standup: UUID? = nil, session: String? = nil, link: URL? = nil) {
+                     since: Date? = nil, standup: UUID? = nil, session: String? = nil, link: URL? = nil,
+                     reminder: (task: UUID, id: UUID)? = nil) {
         guard available else { return }
         let content = UNMutableNotificationContent()
         content.title = title
@@ -375,6 +415,11 @@ enum Notifier {
         if let standup { info["standup"] = standup.uuidString }
         if let session { info["session"] = session }
         if let link { info["link"] = link.absoluteString }
+        if let reminder {
+            content.categoryIdentifier = reminderCategory
+            info["reminderTask"] = reminder.task.uuidString
+            info["reminder"] = reminder.id.uuidString
+        }
         content.userInfo = info
         record(title: title, body: body, problem: nil)
         UNUserNotificationCenter.current().add(

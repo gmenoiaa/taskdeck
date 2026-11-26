@@ -71,6 +71,9 @@ final class AppStore {
     /// A space whose standup sheet should open in the main window: set by the menu bar, a command
     /// or a notification, and cleared by the window once it shows the sheet. Not saved.
     var openStandup: UUID?
+    /// A task the main window should show: set by a click on its reminder, and cleared by the
+    /// window once it shows the task. Not saved.
+    var openTask: UUID?
     /// A request for the main window to open the review sheet: a pull request's link dropped on the
     /// board, or an empty text from the menu bar, where the sheet looks at the clipboard itself.
     /// Cleared by the window once it shows the sheet. Not saved.
@@ -185,6 +188,7 @@ final class AppStore {
             else { return }
             Task { await Orca.reveal(session) }
         }
+        Notifier.onReminder = { [weak self] task, id, snooze in self?.answerReminder(task: task, id: id, snooze: snooze) }
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.now = Date()
@@ -217,6 +221,7 @@ final class AppStore {
                 }
                 self?.noticeTimers()
                 self?.noticeStandups()
+                self?.noticeReminders()
                 self?.trackPresence()
                 self?.noticeNoTimer()
                 try? await Task.sleep(for: .seconds(10))

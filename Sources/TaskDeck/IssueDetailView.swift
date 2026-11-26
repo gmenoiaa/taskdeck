@@ -34,6 +34,7 @@ struct IssueDetailView: View {
     @State private var changeError: String?
     @State private var showEstimates = false
     @State private var pickingDue = false
+    @State private var pickingReminder = false
     @State private var estimateText = ""
     @State private var devEstimateText = ""
     @State private var savingEstimates = false
@@ -520,6 +521,7 @@ struct IssueDetailView: View {
                     }
                 }
                 if let task { fact("Due") { dueMenu(task) } }
+                if let task { fact("Reminder") { reminderMenu(task) } }
                 if let task, sessionCount > 0 { fact("Session") { sessionPills(task) } }
                 ForEach(short, id: \.0) { item in
                     fact(item.0) { factValue(item, in: detail) }
@@ -707,6 +709,23 @@ struct IssueDetailView: View {
         }
         changing = false
         await load(keepingChangeError: true)
+    }
+
+    private func reminderMenu(_ task: TaskItem) -> some View {
+        Menu {
+            ReminderMenuItems(task: task) { pickingReminder = true }
+        } label: {
+            if let reminder = Reminders.shown(task) {
+                let more = task.reminderList.count - 1
+                pill(Reminders.label(reminder.at) + (more > 0 ? " +\(more)" : ""), editable: true, icon: "bell")
+                    .foregroundStyle(reminder.firedAt == nil ? Color.primary : Color.orange)
+            } else {
+                pill("None", editable: true).foregroundStyle(.secondary)
+            }
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help(task.reminderList.isEmpty ? "Get a notification about this task at a time you pick. It is kept in TaskDeck only." : Reminders.help(task))
+        .popover(isPresented: $pickingReminder, arrowEdge: .bottom) { ReminderPicker(taskId: taskId).environment(store) }
     }
 
     private func dueMenu(_ task: TaskItem) -> some View {
