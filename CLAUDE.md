@@ -22,6 +22,9 @@ Things to know:
 - Signing uses the first "Apple Development" or "Developer ID Application" certificate found, so
   the Keychain's "Always Allow" survives rebuilds. Without a certificate it falls back to ad-hoc
   and macOS asks for the Keychain password after every build. Override with `CODESIGN_IDENTITY`.
+- `--install` refuses when the branch is behind `origin/main`: an older app saves `data.json`
+  without the fields it does not know, so it silently drops newer settings. Merge or rebase on
+  main first; `ALLOW_BEHIND_MAIN=1` overrides only when losing those fields is acceptable.
 - `./scripts/make-icon.sh` regenerates the app icon.
 - There is no release, notarisation or distribution step. "Publish" here means installing in
   `/Applications` on this machine.

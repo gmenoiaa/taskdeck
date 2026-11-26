@@ -3,6 +3,23 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# An install from a branch that is behind main puts an older app on the real data.json. That app
+# does not know the fields added since, and its first save drops them: the standup settings of
+# every space were lost this way. Checked before building, so a refusal costs nothing.
+# ALLOW_BEHIND_MAIN=1 installs anyway.
+if [[ " $* " == *" --install "* ]] && [ "${ALLOW_BEHIND_MAIN:-}" != "1" ] && git rev-parse --git-dir >/dev/null 2>&1; then
+    if ! GIT_TERMINAL_PROMPT=0 git fetch -q origin main 2>/dev/null; then
+        echo "Could not reach origin; checking against the last fetched main."
+    fi
+    if git rev-parse -q --verify origin/main >/dev/null && ! git merge-base --is-ancestor origin/main HEAD; then
+        behind="$(git rev-list --count HEAD..origin/main)"
+        echo "Not installing: $(git rev-parse --abbrev-ref HEAD) is $behind commit(s) behind origin/main." >&2
+        echo "An older app would drop the settings it does not know from data.json on its first save." >&2
+        echo "Merge or rebase on origin/main first, or run with ALLOW_BEHIND_MAIN=1 to install anyway." >&2
+        exit 1
+    fi
+fi
+
 swift build -c release
 
 APP="build/TaskDeck.app"
