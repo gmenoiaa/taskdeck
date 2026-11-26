@@ -21,7 +21,7 @@ enum ReviewDetail: String, CaseIterable, Identifiable {
         case .status:
             return "Sends the ticket reference, its column, dates and tracker status, the state of its sessions and pull requests, and when someone last commented. No titles, no names, no comment text, none of your notes and nothing an agent wrote."
         case .ticket:
-            return "Also sends the title, the assignee, the last comments on the ticket with their authors, your notes on the task, and the end of the agent's last answer."
+            return "Also sends the title, the assignee, the last comments on the ticket with their authors, your notes on the task, the end of the agent's last answer and what it left running in the background."
         case .full:
             return "Also sends the agent's whole last answer, what you last typed to it, and what its terminal shows. A terminal can show code and customer data."
         }
@@ -250,7 +250,9 @@ struct ReviewFacts {
                                         ? "Pull request\(number) is still a draft."
                                         : "Pull request\(number) is open for review.", action: "open_pr"))
             }
-            if !statuses.isEmpty, statuses.allSatisfy({ $0.1.kind == .idle }), role == .inProgress || role == .normal {
+            // An agent waiting on a download or a build it started has not stopped working.
+            if !statuses.isEmpty, statuses.allSatisfy({ $0.1.kind == .idle && $0.1.running.isEmpty }),
+               role == .inProgress || role == .normal {
                 findings.append(Finding(urgency: 3, text: "The agent stopped and there is no pull request.", action: "open_session"))
             }
             if !statuses.isEmpty, statuses.allSatisfy({ $0.1.kind == .gone }), role == .inProgress {
@@ -311,7 +313,24 @@ struct ReviewFacts {
             for (session, status) in statuses {
                 var line = "Agent session: \(Claude.sessionState(status.kind))"
                 if let number = status.prNumber { line += ", pull request #\(number)\(status.prDraft ? " (draft)" : "")" }
+                // That something is still running, and since when, is a state and goes at every
+                // level; what it is, in the agent's words, only where text may be sent. Days, not
+                // hours: the text is hashed, and an hour's change would ask Claude again.
+                if !status.running.isEmpty, status.kind != .working {
+                    let oldest = status.running.compactMap(\.since).min()
+                    let age = oldest.map { since -> String in
+                        let days = max(0, Calendar.current.dateComponents([.day], from: since, to: now).day ?? 0)
+                        return days == 0 ? ", started today" : ", the oldest started \(days) day\(days == 1 ? "" : "s") ago"
+                    } ?? ""
+                    let count = status.running.count
+                    line += "; the agent left \(count == 1 ? "a command" : "\(count) commands") running in the background\(age)"
+                        + " and carries on by itself when \(count == 1 ? "it finishes" : "they finish")"
+                }
                 lines.append(line)
+                if detail != .status, status.kind != .working, !status.running.isEmpty {
+                    lines.append("What it left running, as the agent described it:\n"
+                                 + Self.quoted(status.running.map(\.what).joined(separator: "\n")))
+                }
                 guard detail != .status, status.kind != .working, let id = session.worktreeId else { continue }
                 if detail == .full, let prompt = trees[id]?.lastPrompt {
                     lines.append("The developer last typed to it:\n" + Self.quoted(Self.clip(prompt, 600, fromEnd: false)))
@@ -426,6 +445,10 @@ struct ReviewFacts {
     that explains why a task sits still makes it less urgent, a note about something to do by a \
     date that has come makes it more urgent. Do not give an item only because a task has notes, \
     and do not repeat a note back unless it is the reason for the item.
+    - An agent session that left a command running in the background is waiting on its own \
+    work, such as a download or a build, and goes on by itself when it ends. It has not stopped: \
+    do not tell the developer to restart it or check on it. Give an item for it only when its \
+    block shows a problem, or the command has been running for days.
     - Give an item only for a task that needs something from the developer or is at risk: an agent \
     that asks a question or waits for an approval, an agent that says it is done but left no pull \
     request, a merged pull request whose task is still open, an agent that drifted from the ticket \
@@ -621,6 +644,15 @@ extension AppStore {
                                            options: .regularExpression)
         }
         return out
+    }
+
+    /// A review when the overview is shown and the last one is more than ten minutes old, so what
+    /// it lists is not left from hours ago. Costs nothing when nothing changed: Claude is asked
+    /// only when the facts differ from what it last answered.
+    func reviewOnOverviewOpen() {
+        let last = [reviewRanAt, review?.at].compactMap { $0 }.max() ?? .distantPast
+        guard !reviewing, ClaudeCode.isInstalled, Date().timeIntervalSince(last) > 600 else { return }
+        Task { await runReview(automatic: true) }
     }
 
     /// A review nobody asked for, when a session stopped and the user turned this on. At most one

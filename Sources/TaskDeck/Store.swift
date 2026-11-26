@@ -913,16 +913,15 @@ final class AppStore {
     }
 
     /// Reads what the agent last said from Claude Code's transcript, for the sessions of tasks
-    /// that stopped: Orca knows the answer only of agents its own launcher started.
+    /// that stopped: Orca knows the answer only of agents its own launcher started. Read even
+    /// when Orca has the answer: only the transcript says what the agent is waiting for, a
+    /// question or something it left running. A file that has not changed is not read again.
     private func readTranscripts(_ trees: [Orca.Worktree]) async {
         let sessions = tasks.filter { !$0.archived }.flatMap(sessions(of:))
         let mine = Set(sessions.compactMap(\.worktreeId))
         let homes = SessionTranscript.homes(Array(Set(sessions.compactMap(\.claudeHome))).sorted())
         var fresh: [String: SessionTranscript.Last] = [:]
         for tree in trees where mine.contains(tree.id) && tree.status.kind != .working {
-            // A session waiting for me is read even when Orca has its answer: only the
-            // transcript says what it is waiting for.
-            guard tree.status.kind == .yourTurn || tree.status.lastMessage == nil else { continue }
             fresh[tree.id] = await SessionTranscript.last(worktree: tree.path, homes: homes)
         }
         transcripts = fresh
@@ -940,6 +939,7 @@ final class AppStore {
                 // while the transcript is found by folder.
                 if (status.lastMessage ?? "").isEmpty { status.lastMessage = last.message }
                 if status.kind == .yourTurn { status.ask = last.ask }
+                status.running = last.running
             }
             if status.prNumber == nil, let pr = pullRequests[tree.id] {
                 status.prNumber = pr.number

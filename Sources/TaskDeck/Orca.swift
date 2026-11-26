@@ -506,6 +506,8 @@ enum Orca {
         var lastMessage: String?
         /// The question or permission the agent is stopped on, when its transcript ends on one.
         var ask: String?
+        /// What the agent left running in the background, from its transcript.
+        var running: [SessionTranscript.Running] = []
         var prNumber: Int?
         /// An open pull request that is still marked as a draft.
         var prDraft = false

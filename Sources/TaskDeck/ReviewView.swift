@@ -64,6 +64,7 @@ struct ReviewSection: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .sheet(isPresented: $showingPrompt) { SentText(text: store.lastReviewPrompt ?? "") }
+        .task { store.reviewOnOverviewOpen() }
     }
 
     @ViewBuilder
