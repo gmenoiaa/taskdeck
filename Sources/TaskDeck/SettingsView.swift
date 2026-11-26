@@ -190,7 +190,7 @@ private struct NotificationSettingsTab: View {
             Section("Tickets and agents") {
                 Toggle("Ticket assigned to me", isOn: $store.notify.assigned)
                     .help("Checked every 15 minutes while the app is open. Tickets you ignored are not reported.")
-                Toggle("Pull request merged or closed", isOn: $store.notify.pullRequests)
+                Toggle("Pull request reviewed, commented on, merged or closed", isOn: $store.notify.pullRequests)
                 Toggle("Agent sessions", isOn: $store.notify.sessions)
                     .help("When an agent stops and it is your turn, when it opens a pull request, and when the agent queue cannot start a task or needs you to pick a repository.")
                 Text("Tickets are checked every 15 minutes while the app is open. Agent sessions: when it is your turn, a pull request opens, or the queue needs you.")
@@ -317,7 +317,7 @@ private struct AgentSettings: View {
                     ForEach(ClaudeCode.models, id: \.id) { Text($0.label).tag($0.id) }
                 }
                 Toggle("Review when a session stops", isOn: $store.reviewWhenSessionStops)
-                Text("The review in the overview goes over every open task and its agent sessions and lists what needs you. It runs when you ask for it; with the switch on, also when an agent stops, at most every ten minutes. It changes nothing in Orca, the trackers or GitHub.")
+                Text("The review in the overview goes over every open task and its agent sessions and lists what needs you. It runs when you ask for it and when you open the overview, if the last review is more than ten minutes old; with the switch on, also when an agent stops, at most every ten minutes. Claude is asked again only when something changed. It changes nothing in Orca, the trackers or GitHub.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("It uses the login of this one Claude home for every space, not the API key: the requests count against that login's usage limits, the same ones its sessions use. Each space sets how much of it is sent (Edit space, Review); a new space sends its status only. Lines that look like keys or passwords are left out of agent and terminal text, which lowers the risk of sending a secret but does not remove it.")
                     .font(.caption).foregroundStyle(.secondary)

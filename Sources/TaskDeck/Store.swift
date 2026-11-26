@@ -37,6 +37,10 @@ final class AppStore {
     /// Pull requests whose end (merged or closed) was already reported, as "worktree|kind". Saved:
     /// after a launch the app learns again that an old one is merged, and that is not news.
     var announcedPullRequests: Set<String> = []
+    /// For each open pull request's page, when its newest review or comment was written, as of the
+    /// last announcement. Saved, so a launch does not announce old feedback again. A pull request
+    /// first seen with feedback on it takes note of it without a banner.
+    var pullRequestFeedbackSeen: [String: Date] = [:]
     /// What each space's tracker lists as assigned to me, as of the last look (kept in `assigned.json`).
     var assignedTickets: [UUID: [RemoteTicket]] = [:]
     /// Why a space's tracker could not be read at the last look.
@@ -112,6 +116,11 @@ final class AppStore {
     /// a standup only; a merged or closed one is not asked about again.
     @ObservationIgnored private var pullRequestDetails: [URL: Orca.PullRequestDetail] = [:]
     @ObservationIgnored private var pullRequestAsked: [String: Date] = [:]
+    /// Reviews and comments on the sessions' open pull requests, by the pull request's page.
+    @ObservationIgnored private var pullRequestFeedback: [URL: Orca.PullRequestFeedback] = [:]
+    @ObservationIgnored private var feedbackAsked: [URL: Date] = [:]
+    /// The developer's own GitHub logins, read from gh at most every hour.
+    @ObservationIgnored private var githubLogins: (logins: Set<String>, at: Date)?
     @ObservationIgnored private var orcaRepos: [Orca.Repo] = []
     @ObservationIgnored private var orcaReposAt = Date.distantPast
     @ObservationIgnored private var sessionLoop: Task<Void, Never>?
@@ -140,6 +149,7 @@ final class AppStore {
         var knownAssigned: [String]?
         var clearedWaiting: [String]?
         var announcedPullRequests: [String]?
+        var pullRequestFeedbackSeen: [String: Date]?
         var ignoredAssigned: [String]?
         var unloggedRemindedAt: Date?
         var goals: [Goal]?
@@ -170,6 +180,11 @@ final class AppStore {
         Notifier.setUp()
         Notifier.onStart = { [weak self] id, since in self?.startTimer(id, from: since) }
         Notifier.onStandup = { [weak self] id in self?.openStandup = id }
+        Notifier.onSession = { [weak self] worktree in
+            guard let self, let session = self.tasks.lazy.flatMap(self.sessions(of:)).first(where: { $0.worktreeId == worktree })
+            else { return }
+            Task { await Orca.reveal(session) }
+        }
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.now = Date()
@@ -366,6 +381,7 @@ final class AppStore {
             knownAssigned = snap.knownAssigned.map(Set.init)
             clearedWaiting = Set(snap.clearedWaiting ?? [])
             announcedPullRequests = Set(snap.announcedPullRequests ?? [])
+            pullRequestFeedbackSeen = snap.pullRequestFeedbackSeen ?? [:]
             ignoredAssigned = Set(snap.ignoredAssigned ?? [])
             unloggedRemindedAt = snap.unloggedRemindedAt
             goals = snap.goals ?? []
@@ -400,6 +416,7 @@ final class AppStore {
                             knownAssigned: knownAssigned.map { $0.sorted() },
                             clearedWaiting: clearedWaiting.isEmpty ? nil : clearedWaiting.sorted(),
                             announcedPullRequests: announcedPullRequests.isEmpty ? nil : announcedPullRequests.sorted(),
+                            pullRequestFeedbackSeen: pullRequestFeedbackSeen.isEmpty ? nil : pullRequestFeedbackSeen,
                             ignoredAssigned: ignoredAssigned.isEmpty ? nil : ignoredAssigned.sorted(), unloggedRemindedAt: unloggedRemindedAt,
                             goals: goals.isEmpty ? nil : goals,
                             standups: standups.isEmpty ? nil : Self.byString(standups),
@@ -882,6 +899,54 @@ final class AppStore {
         await readTranscripts(trees)
         publish(trees)
         if await askGitHub(trees, limit: force ? 40 : 3) { publish(trees) }
+        await askPullRequestFeedback(limit: force ? 40 : 3)
+    }
+
+    /// Reads reviews and comments on the sessions' open pull requests, a few per refresh and each
+    /// at most every five minutes, and announces what is new.
+    private func askPullRequestFeedback(limit: Int) async {
+        var open: [(url: URL, task: TaskItem, account: String?)] = []
+        for task in tasks where !task.archived {
+            for session in sessions(of: task) {
+                guard let status = status(of: session), status.kind == .prOpen, let url = status.prURL,
+                      !open.contains(where: { $0.url == url }) else { continue }
+                open.append((url, task, session.githubAccount ?? project(task.projectId)?.githubAccount))
+            }
+        }
+        // Pull requests that are no longer open are forgotten, so the saved list does not grow.
+        let pages = Set(open.map(\.url.absoluteString))
+        var changed = false
+        if sessionStatuses != nil, pullRequestFeedbackSeen.keys.contains(where: { !pages.contains($0) }) {
+            pullRequestFeedbackSeen = pullRequestFeedbackSeen.filter { pages.contains($0.key) }
+            changed = true
+        }
+        let due = open.filter { feedbackAsked[$0.url].map { Date().timeIntervalSince($0) >= 300 } ?? true }
+        if !due.isEmpty, Date().timeIntervalSince(githubLogins?.at ?? .distantPast) > 3600 {
+            githubLogins = (await Orca.githubLogins(), Date())
+        }
+        for item in due.prefix(limit) {
+            feedbackAsked[item.url] = Date()
+            // A failed question keeps what was known.
+            guard let feedback = await Orca.pullRequestFeedback(item.url, account: item.account,
+                                                                mine: githubLogins?.logins ?? []) else { continue }
+            pullRequestFeedback[item.url] = feedback
+            let key = item.url.absoluteString
+            if let seen = pullRequestFeedbackSeen[key] {
+                let fresh = feedback.items.filter { $0.at > seen }
+                guard let newest = fresh.last else { continue }
+                announceFeedback(fresh, on: feedback, task: item.task, page: item.url)
+                pullRequestFeedbackSeen[key] = newest.at
+            } else {
+                pullRequestFeedbackSeen[key] = feedback.items.last?.at ?? .distantPast
+            }
+            changed = true
+        }
+        if changed { save() }
+    }
+
+    /// Reviews and comments on a session's open pull request, as last read from GitHub.
+    func feedback(of session: AgentSession) -> Orca.PullRequestFeedback? {
+        status(of: session)?.prURL.flatMap { pullRequestFeedback[$0] }
     }
 
     /// Matches worktrees created in Orca to tasks: same space, and the ticket reference in the name or branch.
@@ -913,16 +978,15 @@ final class AppStore {
     }
 
     /// Reads what the agent last said from Claude Code's transcript, for the sessions of tasks
-    /// that stopped: Orca knows the answer only of agents its own launcher started.
+    /// that stopped: Orca knows the answer only of agents its own launcher started. Read even
+    /// when Orca has the answer: only the transcript says what the agent is waiting for, a
+    /// question or something it left running. A file that has not changed is not read again.
     private func readTranscripts(_ trees: [Orca.Worktree]) async {
         let sessions = tasks.filter { !$0.archived }.flatMap(sessions(of:))
         let mine = Set(sessions.compactMap(\.worktreeId))
         let homes = SessionTranscript.homes(Array(Set(sessions.compactMap(\.claudeHome))).sorted())
         var fresh: [String: SessionTranscript.Last] = [:]
         for tree in trees where mine.contains(tree.id) && tree.status.kind != .working {
-            // A session waiting for me is read even when Orca has its answer: only the
-            // transcript says what it is waiting for.
-            guard tree.status.kind == .yourTurn || tree.status.lastMessage == nil else { continue }
             fresh[tree.id] = await SessionTranscript.last(worktree: tree.path, homes: homes)
         }
         transcripts = fresh
@@ -940,6 +1004,7 @@ final class AppStore {
                 // while the transcript is found by folder.
                 if (status.lastMessage ?? "").isEmpty { status.lastMessage = last.message }
                 if status.kind == .yourTurn { status.ask = last.ask }
+                status.running = last.running
             }
             if status.prNumber == nil, let pr = pullRequests[tree.id] {
                 status.prNumber = pr.number

@@ -7,7 +7,8 @@ import UserNotifications
 struct NotificationSettings: Codable, Equatable {
     /// An agent stopped, opened a pull request, or the queue could not start one.
     var sessions = true
-    /// A pull request of one of the board's sessions was merged or closed.
+    /// A pull request of one of the board's sessions was merged or closed, approved, or someone
+    /// reviewed or commented on it.
     var pullRequests = true
     /// A ticket was assigned to me in a tracker.
     var assigned = true
@@ -172,7 +173,7 @@ extension AppStore {
                     guard !announcedPullRequests.contains(end) else { break }
                     if notify.pullRequests {
                         Notifier.send(title: status.kind == .prMerged ? "Pull request merged" : "Pull request closed",
-                                      body: label(task))
+                                      body: label(task), link: status.prURL)
                     }
                 case .yourTurn, .prOpen, .idle:
                     guard before == .working else { break }
@@ -181,11 +182,14 @@ extension AppStore {
                     let title = status.kind == .prOpen ? "Pull request opened"
                         : status.kind == .yourTurn ? "Your turn" : "Agent stopped"
                     // The banner says what the agent wants, so the session need not be opened
-                    // to find out whether it can wait.
+                    // to find out whether it can wait. A click goes to where it is answered: the
+                    // pull request once there is one, otherwise the session in Orca.
+                    let link = status.kind == .prOpen ? status.prURL : nil
+                    let session = link == nil ? id : nil
                     if let summary = status.summary {
-                        Notifier.send(title: title, subtitle: label(task), body: summary)
+                        Notifier.send(title: title, subtitle: label(task), body: summary, session: session, link: link)
                     } else {
-                        Notifier.send(title: title, body: label(task))
+                        Notifier.send(title: title, body: label(task), session: session, link: link)
                     }
                 case .working, .gone:
                     break
@@ -202,6 +206,28 @@ extension AppStore {
             announcedPullRequests = now
             save()
         }
+    }
+
+    /// New reviews or comments on a session's pull request, in one banner: the weightiest first
+    /// (changes asked for, then an approval, then a comment), with who wrote it and how it starts.
+    func announceFeedback(_ fresh: [Orca.PullRequestFeedback.Item], on feedback: Orca.PullRequestFeedback,
+                          task: TaskItem, page: URL) {
+        guard notify.pullRequests, !fresh.isEmpty else { return }
+        let lead = fresh.last { $0.kind == .changesRequested } ?? fresh.last { $0.kind == .approved } ?? fresh.last!
+        let title: String
+        switch lead.kind {
+        case .changesRequested: title = "Changes requested on #\(feedback.number)"
+        case .approved: title = "Pull request #\(feedback.number) approved"
+        case .comment: title = "New comment on #\(feedback.number)"
+        }
+        // HTML comments are what review apps hide their markers in; the rest is read as plain text.
+        let text = lead.body.replacingOccurrences(of: "(?s)<!--.*?-->", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\*\\*|__|`|(?m)^#+\\s*", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        var body = text.isEmpty ? lead.author : "\(lead.author): \(text.count > 200 ? String(text.prefix(199)) + "…" : text)"
+        if fresh.count > 1 { body += " (and \(fresh.count - 1) more)" }
+        Notifier.send(title: title, subtitle: label(task), body: body, link: page)
     }
 
     /// The two reminders about time: stopped time not logged at the end of the day, and a timer that
@@ -268,9 +294,14 @@ enum Notifier {
         func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                     withCompletionHandler completionHandler: @escaping () -> Void) {
             let info = response.notification.request.content.userInfo
-            if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
-               let id = (info["standup"] as? String).flatMap(UUID.init(uuidString:)) {
-                Task { @MainActor in Notifier.onStandup?(id) }
+            if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+                if let id = (info["standup"] as? String).flatMap(UUID.init(uuidString:)) {
+                    Task { @MainActor in Notifier.onStandup?(id) }
+                } else if let id = info["session"] as? String {
+                    Task { @MainActor in Notifier.onSession?(id) }
+                } else if let link = (info["link"] as? String).flatMap(URL.init(string:)) {
+                    Task { @MainActor in NSWorkspace.shared.open(link) }
+                }
             }
             if response.actionIdentifier == Notifier.startAction,
                let id = (info["task"] as? String).flatMap(UUID.init(uuidString:)), let since = info["since"] as? Double {
@@ -307,6 +338,8 @@ enum Notifier {
     @MainActor static var onStart: ((UUID, Date) -> Void)?
     /// Set by the store: a click on a standup reminder opens that space's update.
     @MainActor static var onStandup: ((UUID) -> Void)?
+    /// Set by the store: a click on a session's banner opens it in Orca, by its worktree id.
+    @MainActor static var onSession: ((String) -> Void)?
 
     static func setUp() {
         guard available else { return }
@@ -321,9 +354,10 @@ enum Notifier {
     }
 
     /// With `startTask`, the notification carries a "Start Timer" button for that task, counting
-    /// from `since`.
+    /// from `since`. A click opens the standup, else the agent session (a worktree id) in Orca,
+    /// else the link; with none of them it only brings the app forward.
     static func send(title: String, subtitle: String? = nil, body: String, startTask: UUID? = nil,
-                     since: Date? = nil, standup: UUID? = nil) {
+                     since: Date? = nil, standup: UUID? = nil, session: String? = nil, link: URL? = nil) {
         guard available else { return }
         let content = UNMutableNotificationContent()
         content.title = title
@@ -332,11 +366,16 @@ enum Notifier {
         // The list of what was sent has one text per notification.
         let body = [subtitle, body].compactMap { $0 }.joined(separator: "\n")
         content.sound = notificationSound
+        var info: [String: Any] = [:]
         if let startTask, let since {
             content.categoryIdentifier = startCategory
-            content.userInfo = ["task": startTask.uuidString, "since": since.timeIntervalSince1970]
+            info["task"] = startTask.uuidString
+            info["since"] = since.timeIntervalSince1970
         }
-        if let standup { content.userInfo = ["standup": standup.uuidString] }
+        if let standup { info["standup"] = standup.uuidString }
+        if let session { info["session"] = session }
+        if let link { info["link"] = link.absoluteString }
+        content.userInfo = info
         record(title: title, body: body, problem: nil)
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)) { error in

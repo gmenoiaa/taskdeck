@@ -10,6 +10,17 @@ enum SessionTranscript {
         var message: String?
         /// The question or permission it is stopped on, when the transcript ends on one.
         var ask: String?
+        /// What it left running in the background and has not heard back from. An agent that
+        /// stopped with something here is waiting on its own work, not on the user.
+        var running: [Running] = []
+    }
+
+    /// A command or subagent the agent started in the background. Claude Code wakes the agent
+    /// when it ends, so until then the agent carries on by itself.
+    struct Running: Hashable, Sendable {
+        /// The agent's own description of it, or the command when it gave none.
+        var what: String
+        var since: Date?
     }
 
     /// The default home plus the ones given, as typed ("~/.claude-work"), each once.
@@ -92,11 +103,12 @@ enum SessionTranscript {
         // Cut somewhere inside a line.
         if start > 0, !lines.isEmpty { lines.removeFirst() }
 
+        let entries = lines.compactMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         var last = Last()
+        last.running = running(entries)
         var newest = true
-        for line in lines.reversed() {
-            guard let entry = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
-                  let type = entry["type"] as? String, type == "assistant" || type == "user",
+        for entry in entries.reversed() {
+            guard let type = entry["type"] as? String, type == "assistant" || type == "user",
                   entry["isSidechain"] as? Bool != true, entry["isMeta"] as? Bool != true,
                   // The summary Claude Code writes when it compacts a long session looks like
                   // the user typing, and would hide the answer given just before it.
@@ -134,6 +146,70 @@ enum SessionTranscript {
             }
         }
         return .session(last)
+    }
+
+    /// What the agent started in the background and has not been told is finished. Claude Code
+    /// tells it with a note naming the tool call; a task the agent stopped itself gets no note,
+    /// only the stop, which names the task's own id. Only what started within the tail read is
+    /// seen, and a session whose Claude Code was quit keeps what it had running listed here.
+    private static func running(_ entries: [[String: Any]]) -> [Running] {
+        var started: [String: Running] = [:]
+        var order: [String] = []
+        var calls: [String: String] = [:]
+        for entry in entries where entry["isSidechain"] as? Bool != true {
+            let type = entry["type"] as? String
+            // A finished task's note is queued first and handed to the agent later; either says it ended.
+            let content = (entry["message"] as? [String: Any])?["content"] ?? entry["content"]
+            let blocks = content as? [[String: Any]] ?? []
+            for block in blocks {
+                switch (type, block["type"] as? String) {
+                case ("assistant", "tool_use"):
+                    guard let id = block["id"] as? String else { continue }
+                    let input = block["input"] as? [String: Any] ?? [:]
+                    let name = block["name"] as? String ?? ""
+                    if input["run_in_background"] as? Bool == true {
+                        let what = ["description", "command", "prompt"].compactMap { input[$0] as? String }
+                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty } ?? name
+                        started[id] = Running(what: what.count > 200 ? String(what.prefix(199)) + "…" : what,
+                                              since: (entry["timestamp"] as? String).flatMap(timestamp))
+                        order.append(id)
+                    } else if name == "TaskStop" || name == "KillShell",
+                              let task = (input["task_id"] ?? input["shell_id"]) as? String, let call = calls[task] {
+                        started[call] = nil
+                    }
+                case ("user", "tool_result"):
+                    guard let call = block["tool_use_id"] as? String, started[call] != nil else { continue }
+                    if block["is_error"] as? Bool == true { started[call] = nil; continue }
+                    let text = block["content"] as? String
+                        ?? (block["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+                    if let task = matches(#"with ID: ([A-Za-z0-9_-]+)"#, in: text).first { calls[task] = call }
+                default:
+                    break
+                }
+            }
+            for text in [content as? String].compactMap({ $0 }) + blocks.compactMap({ $0["text"] as? String })
+            where text.contains("<task-notification>") {
+                for call in matches(#"<tool-use-id>([^<]+)</tool-use-id>"#, in: text) { started[call] = nil }
+                for task in matches(#"<task-id>([^<]+)</task-id>"#, in: text) {
+                    if let call = calls[task] { started[call] = nil }
+                }
+            }
+        }
+        return order.compactMap { started[$0] }
+    }
+
+    /// The first group of each match.
+    private static func matches(_ pattern: String, in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+            Range(match.range(at: 1), in: text).map { String(text[$0]) }
+        }
+    }
+
+    private static func timestamp(_ text: String) -> Date? {
+        let format = ISO8601DateFormatter()
+        format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return format.date(from: text) ?? ISO8601DateFormatter().date(from: text)
     }
 
     /// A tool call the agent is stopped on, in words.
