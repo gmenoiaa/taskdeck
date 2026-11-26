@@ -180,6 +180,11 @@ final class AppStore {
         Notifier.setUp()
         Notifier.onStart = { [weak self] id, since in self?.startTimer(id, from: since) }
         Notifier.onStandup = { [weak self] id in self?.openStandup = id }
+        Notifier.onSession = { [weak self] worktree in
+            guard let self, let session = self.tasks.lazy.flatMap(self.sessions(of:)).first(where: { $0.worktreeId == worktree })
+            else { return }
+            Task { await Orca.reveal(session) }
+        }
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.now = Date()
@@ -929,7 +934,7 @@ final class AppStore {
             if let seen = pullRequestFeedbackSeen[key] {
                 let fresh = feedback.items.filter { $0.at > seen }
                 guard let newest = fresh.last else { continue }
-                announceFeedback(fresh, on: feedback, task: item.task)
+                announceFeedback(fresh, on: feedback, task: item.task, page: item.url)
                 pullRequestFeedbackSeen[key] = newest.at
             } else {
                 pullRequestFeedbackSeen[key] = feedback.items.last?.at ?? .distantPast
