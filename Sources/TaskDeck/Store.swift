@@ -817,9 +817,9 @@ final class AppStore {
         save()
     }
 
-    func setNotes(_ id: UUID, _ text: String) {
-        guard let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].notes != text else { return }
-        tasks[i].notes = text
+    func setNotes(_ id: UUID, _ notes: [TaskNote]) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }), tasks[i].noteList != notes else { return }
+        tasks[i].noteList = notes
         save()
     }
 

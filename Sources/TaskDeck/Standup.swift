@@ -1,8 +1,8 @@
 import Foundation
 
 /// What the app knows about one space's work for a standup update, sorted into what was done in
-/// the period, what is on the board now, and what waits. Only this space's tasks, and never their
-/// private notes or unsent ticket drafts.
+/// the period, what is on the board now, and what waits. Only this space's tasks, with the user's
+/// notes on them, and never their unsent ticket drafts.
 @MainActor
 struct StandupFacts {
     struct Line {
@@ -71,6 +71,8 @@ struct StandupFacts {
                     facts.append(pullRequestFact(number, status: status, detail: store.pullRequest(of: session)))
                 }
             }
+            // The user's own notes say what the tracker does not: why it waits, what comes next.
+            facts += task.noteFacts(limit: 5, length: 400).map { "The developer's own note, \($0)" }
             return facts
         }
         func day(_ date: Date) -> String { date.formatted(.dateTime.day().month(.abbreviated)) }

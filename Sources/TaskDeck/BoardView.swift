@@ -44,7 +44,7 @@ struct BoardView: View {
         if let goalFilter, task.goalId != goalFilter { return false }
         let words = search.split(whereSeparator: \.isWhitespace)
         guard !words.isEmpty else { return true }
-        let text = [task.title, task.displayRef, task.ref, task.notes, task.remoteStatus ?? "", task.remoteType ?? "",
+        let text = [task.title, task.displayRef, task.ref, task.notesText, task.remoteStatus ?? "", task.remoteType ?? "",
                     task.estimateGap != nil ? "no estimate" : "",
                     task.due.map { "due " + Due.label($0) + (Due.daysLeft($0) < 0 ? " overdue" : "") } ?? "",
                     task.remoteAssignee ?? "", store.project(task.projectId)?.name ?? "",
@@ -1429,9 +1429,11 @@ struct TaskCard: View {
                 .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            if !task.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // The newest note, with how many more there are.
+            if let latest = task.noteList.last {
+                let more = task.noteList.count - 1
                 Label {
-                    Text(task.notes.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\n", with: " "))
+                    Text((more > 0 ? "+\(more)  " : "") + latest.text.replacingOccurrences(of: "\n", with: " "))
                         .lineLimit(2)
                 } icon: {
                     Image(systemName: "note.text")
@@ -1439,7 +1441,7 @@ struct TaskCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .help(task.notes)
+                .help(task.notesText)
             }
 
             footer(project: project, running: running)

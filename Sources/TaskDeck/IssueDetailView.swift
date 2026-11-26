@@ -24,8 +24,6 @@ struct IssueDetailView: View {
     @State private var posting = false
     @State private var postError: String?
     @State private var explanation = ""
-    @State private var notes = ""
-    @State private var notesLoaded = false
     @State private var explaining = false
     @State private var explainError: String?
     @State private var explainCopied = false
@@ -243,8 +241,6 @@ struct IssueDetailView: View {
         })
         .task {
             explanation = task?.explanation ?? ""
-            notes = task?.notes ?? ""
-            notesLoaded = true
             // The copy from last time shows at once; the tracker is asked again behind it.
             if let cached = TicketCache.load(taskId) {
                 detail = cached.detail
@@ -286,21 +282,11 @@ struct IssueDetailView: View {
             .frame(maxWidth: .infinity).padding(.top, 60)
     }
 
-    /// Private notes about the task. They stay on this Mac and are never posted to the tracker.
+    /// The user's own notes about the task. They are never posted to the tracker.
     private var notesSection: some View {
         section("My notes") {
-            TextEditor(text: $notes)
-                .font(.body)
-                .scrollContentBackground(.hidden)
-                .padding(6)
-                .frame(minHeight: 70, maxHeight: 200)
-                .background(Color.yellow.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.yellow.opacity(0.35)))
-                .onChange(of: notes) {
-                    if notesLoaded { store.setNotes(taskId, notes) }
-                }
-            Text("Private: saved only on this Mac, not posted to \(project?.kind.label ?? "the tracker") and not sent to the AI.")
-                .font(.caption).foregroundStyle(.secondary)
+            NotesEditor(notes: Binding(get: { task?.noteList ?? [] }, set: { store.setNotes(taskId, $0) }),
+                        tracker: project?.kind.label, review: project?.review)
         }
     }
 

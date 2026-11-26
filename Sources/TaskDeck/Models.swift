@@ -235,6 +235,14 @@ struct TimeEntry: Identifiable, Codable, Hashable {
     }
 }
 
+/// Something the user wrote down about a task. Kept on this Mac and never posted to the tracker;
+/// the review and the standup read it, no other AI feature does.
+struct TaskNote: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var text = ""
+    var at = Date()
+}
+
 struct TaskItem: Identifiable, Codable, Hashable {
     var id = UUID()
     var projectId: UUID?
@@ -244,10 +252,13 @@ struct TaskItem: Identifiable, Codable, Hashable {
     /// Id of the board column the task is in.
     var status: String = "todo"
     var entries: [TimeEntry] = []
+    /// The single note a task had before it could hold several. Still read from old files and
+    /// emptied once the notes are changed; use `noteList`.
     var notes = ""
-    /// The ticket description written for a task that has no ticket yet (Markdown). Unlike `notes`
-    /// it is meant to leave the app: it goes to Claude and, when the ticket is created, to the
-    /// tracker. Cleared once the task has a ticket, whose own description then counts.
+    /// The task's notes, oldest first. Nil in a file saved before there could be several.
+    var noteItems: [TaskNote]?
+    /// The ticket description written for a task that has no ticket yet (Markdown). Unlike the
+    /// notes it goes to the tracker when the ticket is created, and to every AI feature. Cleared once the task has a ticket, whose own description then counts.
     var draft: String?
     var createdAt = Date()
     var archived = false
@@ -283,6 +294,35 @@ struct TaskItem: Identifiable, Codable, Hashable {
     static let movesKept = 10
 
     var isRunning: Bool { entries.contains { $0.end == nil } }
+
+    /// The notes, oldest first. A note from an old file counts as one, written when the task was made.
+    var noteList: [TaskNote] {
+        get {
+            if let noteItems { return noteItems }
+            let old = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+            // The task's own id, so the row keeps its identity until the list is first saved.
+            return old.isEmpty ? [] : [TaskNote(id: id, text: old, at: createdAt)]
+        }
+        set {
+            noteItems = newValue
+            notes = ""
+        }
+    }
+
+    /// Every note as one text, newest first: for the search and the card.
+    var notesText: String { noteList.reversed().map(\.text).joined(separator: "\n") }
+
+    /// The notes as facts for Claude, oldest first and dated, so it can tell which are recent.
+    /// Only the review and the standup send them; the caller decides whether the space allows it.
+    func noteFacts(limit: Int = 8, length: Int = 600) -> [String] {
+        noteList.suffix(limit).compactMap { note in
+            // On one line: a note's own lists would read as part of the facts around it.
+            let body = note.text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            guard !body.isEmpty else { return nil }
+            let clipped = body.count > length ? String(body.prefix(length)) + " […]" : body
+            return "\(note.at.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute())): \(clipped)"
+        }
+    }
 
     mutating func noteMove(to column: String, at date: Date = Date()) {
         moves = Array(((moves ?? []) + [ColumnMove(column: column, at: date)]).suffix(Self.movesKept))

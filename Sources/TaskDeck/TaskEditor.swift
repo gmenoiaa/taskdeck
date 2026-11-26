@@ -114,7 +114,7 @@ struct TaskEditor: View {
                     // No column: a card is placed and moved on the board. No notes on a new task
                     // either: creating one is a ticket and a name, the rest comes after.
                     if !isNew && !hasDetails {
-                        TextField("Notes", text: $task.notes, axis: .vertical).lineLimit(2...5)
+                        NotesEditor(notes: $task.noteList, review: project?.review)
                     }
                 }
 
@@ -233,7 +233,7 @@ struct TaskEditor: View {
             task.status = live.status
             task.order = live.order
             task.dueDate = live.dueDate
-            if hasDetails { task.notes = live.notes }
+            if hasDetails { task.noteList = live.noteList }
             let before = Dictionary(uniqueKeysWithValues: original.entries.map { ($0.id, $0) })
             let draft = Dictionary(uniqueKeysWithValues: task.entries.map { ($0.id, $0) })
             let kept = live.entries.compactMap { entry -> TimeEntry? in
