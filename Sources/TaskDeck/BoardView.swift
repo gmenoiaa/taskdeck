@@ -661,24 +661,30 @@ struct SessionBadges: View {
     let space: Project?
     let count: Int
     var compact = false
+    /// Hands the two badges to the parent one by one, so a `FlowLayout` can put the second on
+    /// its own line. As one unit they were wider than a narrow card and pushed it out of its lane.
+    var wraps = false
 
     var body: some View {
-        HStack(spacing: 4) {
-            if let status, let pr = status.prURL {
-                Button { Browser.open(pr, space: space) } label: {
-                    PullRequestBadge(status: status, compact: compact).contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .help("\(status.isAboutPullRequest ? status.detail : "A pull request is open for this worktree.") Click to open it.")
-            }
-            Button { Task { await Orca.reveal(session) } } label: {
-                SessionBadge(status: status, count: count, compact: compact, agentOnly: status?.prURL != nil)
-                    .fixedSize()
-                    .contentShape(Capsule())
+        if wraps { badges } else { HStack(spacing: 4) { badges } }
+    }
+
+    @ViewBuilder
+    private var badges: some View {
+        if let status, let pr = status.prURL {
+            Button { Browser.open(pr, space: space) } label: {
+                PullRequestBadge(status: status, compact: compact).contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .help("Agent session “\(session.name)” in \(session.repoName). \(status?.isAboutPullRequest == true ? "" : status?.detail ?? "") Click to open it in Orca.")
+            .help("\(status.isAboutPullRequest ? status.detail : "A pull request is open for this worktree.") Click to open it.")
         }
+        Button { Task { await Orca.reveal(session) } } label: {
+            SessionBadge(status: status, count: count, compact: compact, agentOnly: status?.prURL != nil)
+                .fixedSize()
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Agent session “\(session.name)” in \(session.repoName). \(status?.isAboutPullRequest == true ? "" : status?.detail ?? "") Click to open it in Orca.")
     }
 }
 
@@ -1285,7 +1291,7 @@ struct TaskCard: View {
         }
         if let session = store.headlineSession(of: task) {
             SessionBadges(session: session, status: store.status(of: session), space: project,
-                          count: store.sessions(of: task).count)
+                          count: store.sessions(of: task).count, wraps: true)
         }
     }
 
