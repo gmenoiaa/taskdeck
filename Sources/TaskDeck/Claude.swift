@@ -293,7 +293,8 @@ enum Claude {
 
     You get the facts the developer's task app knows for this team only: tickets with time \
     tracked, column moves, agent sessions and pull requests in the period, the board as it is now, \
-    tickets that wait, tickets newly assigned, and sometimes the developer's previous update.
+    tickets that wait, tickets newly assigned, the developer's own notes on a ticket, and sometimes \
+    the developer's previous update.
 
     - Write in the first person, as the developer ("Fixed…", "Reviewing…"). Plain English: short \
     sentences, common words, active voice.
@@ -312,6 +313,11 @@ enum Claude {
     when there are none. An agent session that waits for the developer is not a blocker.
     - Comments are dated; use only those from the period, and only for what they say about progress \
     or blockers.
+    - The developer's own notes are dated too and were written for themselves. Use them for what \
+    they say about progress, the plan for today or what a ticket waits on: a note from the period \
+    is news, an older one still holds unless a later fact says otherwise. Put what a note says in \
+    the developer's words for the team; do not quote it, and leave out anything in it that reads \
+    as personal or not meant for the team.
     - No time figures unless the instructions below ask for them.
     - Keep it short: at most five bullets per part.
 

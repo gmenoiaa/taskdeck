@@ -178,7 +178,7 @@ private struct SentText: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("What was sent to Claude").font(.title3.weight(.semibold))
-            Text("The instructions, then one block per task. Private notes and unsent ticket drafts are never part of it.")
+            Text("The instructions, then one block per task. Your notes on a task are part of it only where its space's review sends more than the status. Unsent ticket drafts never are.")
                 .font(.caption).foregroundStyle(.secondary)
             ScrollView {
                 Text(text).font(.callout.monospaced()).textSelection(.enabled)

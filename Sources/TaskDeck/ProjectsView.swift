@@ -179,7 +179,7 @@ struct ProjectEditor: View {
                                                                   set: { project.reviewDetail = $0 == .status ? nil : $0.rawValue })) {
                             ForEach(ReviewDetail.allCases) { Text($0.label).tag($0) }
                         }
-                        Text(project.review.hint + " One Claude login reviews every space (Settings, Agents), so this is what that login gets to see of this space. Private notes are never sent.")
+                        Text(project.review.hint + " One Claude login reviews every space (Settings, Agents), so this is what that login gets to see of this space.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Section("First message to the agent") {

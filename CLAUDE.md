@@ -51,7 +51,11 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
   helpers live in `Glass.swift`.
 - Colours come from `Theme`; `Theme.accent` (red) is the app tint. Neutral controls pass
   `.tint(nil)`.
-- Private notes are never sent to the AI — the UI promises this, keep it true.
+- A task's notes (`TaskItem.noteList`) go to Claude in two places only: the review, where the
+  space's `reviewDetail` is above status only, and the standup update. No other AI feature gets
+  them (explain, estimate, ticket drafts, goals, agent sessions), and a goal's own notes are never
+  sent at all. The UI says exactly this (`NotesEditor`, the review and standup captions) — keep
+  the text and the code in step.
 - The review (`Review.swift`) runs on one Claude Code login for every space, so each space's data
   goes out only at that space's `reviewDetail` level; anything new it sends must respect the level.
 - Comments explain *why*, not *what*. User-facing text is plain English, no marketing tone.

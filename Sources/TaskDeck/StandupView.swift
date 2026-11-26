@@ -110,7 +110,7 @@ struct StandupView: View {
                 }
             Text(Claude.apiKey() == nil
                  ? "No Claude API key, so this is a plain list of the facts. Set one in Settings → AI to have Claude write it."
-                 : "The space's open tickets are read again from the tracker first. Sent to Claude: this space's tasks, their column, tracker status, time, latest comments, and pull requests with their description. Notes are not sent.")
+                 : "The space's open tickets are read again from the tracker first. Sent to Claude: this space's tasks, their column, tracker status, time, latest comments, your notes on them, and pull requests with their description.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(16)
