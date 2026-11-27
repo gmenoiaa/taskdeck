@@ -186,6 +186,16 @@ private struct ChannelSection: View {
                 }
                 Text("Only what is also turned on above is sent; these choose which of those go to \(channel.label) too. They are sent only while TaskDeck is running on this Mac and the Mac is awake.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle("Only when I am away from this Mac", isOn: Binding(
+                    get: { settings.awayOnly }, set: { settings.onlyWhenAway = $0 ? true : nil }))
+                if settings.awayOnly {
+                    Picker("Away after", selection: Binding(
+                        get: { settings.idleMinutes }, set: { settings.awayMinutes = $0 })) {
+                        ForEach([2, 5, 10, 15, 30], id: \.self) { Text("\($0) minutes without using it").tag($0) }
+                    }
+                    Text("Away means the screen is locked or off, or no key was pressed and the pointer did not move for that long. While you are at the Mac, only the banner here shows. A Mac that is asleep sends nothing.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             Text(channel.privacyNote).font(.caption).foregroundStyle(.secondary)
             HStack {

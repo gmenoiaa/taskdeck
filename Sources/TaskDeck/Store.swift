@@ -141,7 +141,9 @@ final class AppStore {
     /// Saved, so a Mac that shut down while asleep still asks on the next launch.
     @ObservationIgnored private(set) var awaySince: Date?
     /// What currently keeps the user away. They are back when it is empty.
-    @ObservationIgnored private var awayReasons: Set<String> = []
+    @ObservationIgnored private var awayReasons: Set<String> = [] {
+        didSet { UserActivity.screenAway = !awayReasons.isEmpty }
+    }
     @ObservationIgnored private var askingAboutAway = false
 
     private struct Snapshot: Codable {

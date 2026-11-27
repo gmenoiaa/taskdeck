@@ -54,9 +54,21 @@ protocol NotificationChannel: Sendable {
 struct ChannelSettings: Codable, Equatable {
     var enabled = false
     var kinds: [String] = [Notice.Kind.sessions, .pullRequests, .assigned, .reminders].map(\.rawValue)
+    /// Send only while the user is away from this Mac; the banner is enough while they are at it.
+    /// Optional, like `awayMinutes`, so files saved before the option existed still load.
+    var onlyWhenAway: Bool?
+    /// How long without a key press or pointer movement counts as away.
+    var awayMinutes: Int?
 
+    var awayOnly: Bool { onlyWhenAway ?? false }
+    var idleMinutes: Int { awayMinutes ?? 5 }
+
+    /// Whether a notice of this kind goes to the channel now. A test always goes.
     func sends(_ kind: Notice.Kind) -> Bool {
-        enabled && (kind == .test || kinds.contains(kind.rawValue))
+        guard enabled else { return false }
+        if kind == .test { return true }
+        guard kinds.contains(kind.rawValue) else { return false }
+        return !awayOnly || UserActivity.isAway(idleMinutes: idleMinutes)
     }
 }
 
