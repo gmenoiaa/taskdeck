@@ -61,7 +61,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         case .timer: return task.isRunning
         case .working: return session(.working)
         case .yourTurn: return session(.yourTurn)
-        case .prOpen: return session(.prOpen)
+        case .prOpen: return session(.prOpen) || task.pullRequestList.contains(where: \.isOpen)
         case .session: return !store.sessions(of: task).isEmpty
         case .noEstimate: return task.estimateGap != nil
         // Finished work is not due any more, whatever its date says.
@@ -160,6 +160,10 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
         if item.kind == .assigned { showImport = true; return }
         if let session = item.session, item.kind == .yourTurn {
             Task { await Orca.reveal(session) }
+            return
+        }
+        if item.kind == .pullRequest, let link = item.link {
+            Browser.open(link, space: store.project(item.task?.projectId))
             return
         }
         guard let task = item.task else { return }
@@ -679,6 +683,9 @@ struct SessionBadges: View {
     let status: Orca.Status?
     let space: Project?
     let count: Int
+    /// The task's newest pull request, where the badges stand for the whole task (a card): shown
+    /// instead of the session's own, which may be an older one or none.
+    var pullRequest: TaskPullRequest?
     var compact = false
     /// Hands the two badges to the parent one by one, so a `FlowLayout` can put the second on
     /// its own line. As one unit they were wider than a narrow card and pushed it out of its lane.
@@ -690,7 +697,13 @@ struct SessionBadges: View {
 
     @ViewBuilder
     private var badges: some View {
-        if let status, let pr = status.prURL {
+        if let pullRequest, let page = pullRequest.url {
+            Button { Browser.open(page, space: space) } label: {
+                PullRequestBadge(pullRequest, compact: compact).contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("\(pullRequest.title ?? pullRequest.label)\(pullRequest.attention.map { " — \($0)" } ?? ""). Click to open it.")
+        } else if let status, let pr = status.prURL {
             Button { Browser.open(pr, space: space) } label: {
                 PullRequestBadge(status: status, compact: compact).contentShape(Capsule())
             }
@@ -698,7 +711,7 @@ struct SessionBadges: View {
             .help("\(status.isAboutPullRequest ? status.detail : "A pull request is open for this worktree.") Click to open it.")
         }
         Button { Task { await Orca.reveal(session) } } label: {
-            SessionBadge(status: status, count: count, compact: compact, agentOnly: status?.prURL != nil)
+            SessionBadge(status: status, count: count, compact: compact, agentOnly: pullRequest != nil || status?.prURL != nil)
                 .fixedSize()
                 .contentShape(Capsule())
         }
@@ -821,7 +834,8 @@ private struct WaitingList: View {
         switch kind {
         case .yourTurn, .repository, .reminder: return .orange
         case .notStarted: return .red
-        case .pullRequest, .assigned: return .secondary
+        case .pullRequest: return .orange
+        case .assigned: return .secondary
         }
     }
 }
@@ -1317,7 +1331,12 @@ struct TaskCard: View {
         }
         if let session = store.headlineSession(of: task) {
             SessionBadges(session: session, status: store.status(of: session), space: project,
-                          count: store.sessions(of: task).count, wraps: true)
+                          count: store.sessions(of: task).count, pullRequest: store.latestPullRequest(of: task), wraps: true)
+        } else if let pr = store.latestPullRequest(of: task), let page = pr.url {
+            // A pull request added by its link, or one whose sessions were all taken off the list.
+            Button { Browser.open(page, space: project) } label: { PullRequestBadge(pr).contentShape(Capsule()) }
+                .buttonStyle(.plain)
+                .help("\(pr.title ?? pr.label)\(pr.attention.map { " — \($0)" } ?? ""). Click to open it.")
         }
     }
 
@@ -1541,7 +1560,8 @@ struct TaskCard: View {
             if let session = store.headlineSession(of: task) {
                 Button("Open session in Orca") { Task { await Orca.reveal(session) } }
             }
-            if let pr = store.sessions(of: task).compactMap({ store.status(of: $0)?.prURL }).last {
+            if let pr = store.latestPullRequest(of: task)?.url
+                ?? store.sessions(of: task).compactMap({ store.status(of: $0)?.prURL }).last {
                 Button("Open pull request in browser") { Browser.open(pr, space: project) }
             }
             let removable = store.removableSessions(of: task)

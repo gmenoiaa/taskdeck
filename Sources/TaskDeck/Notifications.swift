@@ -7,8 +7,8 @@ import UserNotifications
 struct NotificationSettings: Codable, Equatable {
     /// An agent stopped, opened a pull request, or the queue could not start one.
     var sessions = true
-    /// A pull request of one of the board's sessions was merged or closed, approved, or someone
-    /// reviewed or commented on it.
+    /// A pull request of one of the board's tasks was merged or closed, approved, someone
+    /// reviewed or commented on it, its checks failed or it cannot be merged for a conflict.
     var pullRequests = true
     /// A ticket was assigned to me in a tracker.
     var assigned = true
@@ -86,6 +86,8 @@ extension AppStore {
         var detail: String
         /// What the session asks for or last said, under the detail.
         var note: String?
+        /// The page a pull request's item opens.
+        var link: URL?
     }
 
     /// What the bell and the Dock badge show: everything waiting, less what was cleared by hand.
@@ -138,10 +140,12 @@ extension AppStore {
                 if status.kind == .yourTurn {
                     items.append(WaitingItem(id: "turn-\(key)", kind: .yourTurn, task: task, session: session,
                                              detail: "Your turn in \(session.name)", note: status.summary))
-                } else if notify.badgePullRequests, status.kind == .prOpen, !status.prDraft {
-                    items.append(WaitingItem(id: "pr-\(key)", kind: .pullRequest, task: task, session: session,
-                                             detail: "\(status.label) is open"))
                 }
+            }
+            for pr in task.pullRequestList {
+                guard let attention = pr.attention else { continue }
+                items.append(WaitingItem(id: "pr-\(pr.id)", kind: .pullRequest, task: task,
+                                         detail: "\(pr.label): \(attention)", note: pr.title, link: pr.url))
             }
         }
         // One line per ticket, whatever the Dock badge counts: these are what "ticket assigned to
@@ -154,10 +158,12 @@ extension AppStore {
         return items
     }
 
-    /// The Dock badge's number. Assigned tickets count only when the setting asks for them;
-    /// the bell lists them either way.
+    /// The Dock badge's number. Assigned tickets and pull requests count only when the setting
+    /// asks for them; the bell lists them either way.
     var waitingCount: Int {
-        waitingItems.filter { $0.kind != .assigned || notify.badgeAssigned }.count
+        waitingItems.filter {
+            ($0.kind != .assigned || notify.badgeAssigned) && ($0.kind != .pullRequest || notify.badgePullRequests)
+        }.count
     }
 
     static let reminderPrefix = "reminder-"
@@ -167,33 +173,21 @@ extension AppStore {
         return text.isEmpty ? "(untitled)" : text
     }
 
-    /// Compares each session with the last look: an agent that stopped working, and a pull request
-    /// that was merged or closed. The first look after launch only takes note.
+    /// Compares each session with the last look: an agent that stopped working. The first look
+    /// after launch only takes note. What happens to a pull request is noticed from GitHub's
+    /// answers instead, in `noticePullRequest`.
     func noticeSessionChanges() {
         // No answer from Orca says nothing about the sessions, so the last look is kept.
         guard sessionStatuses != nil else { return }
         var seen: [String: Orca.Status.Kind] = [:]
-        var ended: Set<String> = []
         var stopped = false
         for task in tasks where !task.archived {
             for session in sessions(of: task) {
                 guard let id = session.worktreeId, let status = status(of: session) else { continue }
                 seen[id] = status.kind
-                // Said once per pull request, across launches: after each launch a session reads
-                // as idle until GitHub answers "merged", which looked like a change every time.
-                let end = "\(id)|\(status.kind == .prMerged ? "merged" : "closed")"
-                let isEnd = status.kind == .prMerged || status.kind == .prClosed
-                if isEnd { ended.insert(end) }
-                guard let before = sessionKinds[id], before != status.kind else { continue }
+                guard let before = sessionKinds[id], before != status.kind, before == .working else { continue }
                 switch status.kind {
-                case .prMerged, .prClosed:
-                    guard !announcedPullRequests.contains(end) else { break }
-                    if notify.pullRequests {
-                        Notifier.send(title: status.kind == .prMerged ? "Pull request merged" : "Pull request closed",
-                                      body: label(task), link: status.prURL)
-                    }
                 case .yourTurn, .prOpen, .idle:
-                    guard before == .working else { break }
                     stopped = true
                     guard notify.sessions else { break }
                     let title = status.kind == .prOpen ? "Pull request opened"
@@ -208,21 +202,55 @@ extension AppStore {
                     } else {
                         Notifier.send(title: title, body: label(task), session: session, link: link)
                     }
-                case .working, .gone:
+                case .working, .gone, .prMerged, .prClosed:
                     break
                 }
             }
         }
         sessionKinds = seen
         if stopped { reviewAfterSessionStopped() }
-        // Everything ended and seen counts as said, also what was found ended at the first look.
-        // Ends of sessions that no longer exist are dropped so the list does not grow for ever.
-        let known = announcedPullRequests.filter { seen[String($0.split(separator: "|").first ?? "")] != nil }
-        let now = known.union(ended)
-        if now != announcedPullRequests {
-            announcedPullRequests = now
-            save()
+    }
+
+    /// Works out what is news in GitHub's answer about a pull request, marks it on `pr` as said,
+    /// and sends it when `announce`. The first answer only takes note of what is already there,
+    /// except an end: a pull request Orca reported as open and GitHub now says is merged is news.
+    func noticePullRequest(_ report: Orca.PullRequestReport, old: TaskPullRequest, new pr: inout TaskPullRequest,
+                           task: TaskItem, announce: Bool) {
+        let tell = announce && notify.pullRequests
+        var said = Set(old.announced ?? [])
+
+        if let seen = old.feedbackSeenAt {
+            let fresh = report.feedback.items.filter { $0.at > seen }
+            if let newest = fresh.last {
+                if tell, let page = pr.url { announceFeedback(fresh, on: report.feedback, task: task, page: page) }
+                pr.feedbackSeenAt = newest.at
+            }
+        } else {
+            pr.feedbackSeenAt = report.feedback.items.last?.at ?? .distantPast
         }
+
+        if let state = pr.state, state == "merged" || state == "closed" {
+            if said.insert(state).inserted, tell, old.state == "open" {
+                Notifier.send(title: "Pull request #\(pr.number) \(state == "merged" ? "merged" : "closed without merging")",
+                              body: label(task), link: pr.url)
+            }
+        } else {
+            // Reopened: its next end is news again.
+            said.subtract(["merged", "closed"])
+        }
+
+        // Once per push: a failure that is still there five minutes later is the same failure.
+        if pr.isOpen, let sha = pr.headSha {
+            said = said.filter { !$0.contains(":") || $0.hasSuffix(":" + sha) }
+            let first = old.checkedAt == nil
+            if pr.checks == "failing", said.insert("checks:" + sha).inserted, tell, !first {
+                Notifier.send(title: "Checks failed on pull request #\(pr.number)", body: label(task), link: pr.url)
+            }
+            if pr.conflict == true, said.insert("conflict:" + sha).inserted, tell, !first {
+                Notifier.send(title: "Pull request #\(pr.number) has a merge conflict", body: label(task), link: pr.url)
+            }
+        }
+        pr.announced = said.isEmpty ? nil : said.sorted()
     }
 
     /// New reviews or comments on a session's pull request, in one banner: the weightiest first

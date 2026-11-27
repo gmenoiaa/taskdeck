@@ -420,8 +420,9 @@ struct SessionBadge: View {
         case .working: return .blue
         // Orange is the app's "needs you" colour, as on the not-logged-time chip.
         case .yourTurn: return .orange
-        case .prOpen: return .purple
-        case .prMerged: return .green
+        // As on GitHub: open is green, merged purple.
+        case .prOpen: return .green
+        case .prMerged: return .purple
         default: return .secondary
         }
     }
@@ -446,23 +447,43 @@ struct SessionBadge: View {
     }
 }
 
-/// A chip for a session's pull request, apart from the session's own badge.
+/// A chip for a pull request, apart from the session's own badge.
 struct PullRequestBadge: View {
-    let status: Orca.Status
+    private let label: String
+    private let color: Color
     var compact = false
 
-    private var color: Color {
+    /// A session's pull request, as Orca's status has it.
+    init(status: Orca.Status, compact: Bool = false) {
         switch status.kind {
-        case .prMerged: return .green
-        case .prClosed: return .secondary
-        default: return .purple
+        case .prMerged: color = .purple
+        case .prClosed: color = .secondary
+        default: color = status.prDraft ? .secondary : .green
         }
-    }
-
-    private var label: String {
         // While the agent works or waits the status is about the agent, so the number is all
         // that is known about the pull request.
-        status.isAboutPullRequest ? status.label : status.prNumber.map { "PR #\($0)" } ?? "PR"
+        label = status.isAboutPullRequest ? status.label : status.prNumber.map { "PR #\($0)" } ?? "PR"
+        self.compact = compact
+    }
+
+    /// One of a task's saved pull requests, as GitHub last had it. The colour says where it
+    /// stands: purple merged, grey closed or draft, and for an open one red when its checks fail
+    /// or it conflicts, orange when a review or comment waits for an answer, green when its
+    /// checks pass or it is approved, blue while checks run or nothing is known yet.
+    init(_ pullRequest: TaskPullRequest, compact: Bool = false) {
+        switch pullRequest.state {
+        case "merged": color = .purple
+        case "closed": color = .secondary
+        default:
+            if pullRequest.checks == "failing" || pullRequest.conflict == true { color = .red }
+            else if (pullRequest.waiting ?? 0) > 0 { color = .orange }
+            else if pullRequest.draft == true { color = .secondary }
+            else if pullRequest.checks == "pending" || pullRequest.checkedAt == nil { color = .blue }
+            else if pullRequest.checks == "passing" || pullRequest.approved == true { color = .green }
+            else { color = .blue }
+        }
+        label = pullRequest.label
+        self.compact = compact
     }
 
     var body: some View {

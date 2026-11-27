@@ -57,6 +57,7 @@ enum Orca {
         let number: Int
         /// "open", "merged" or "closed".
         let state: String
+        var draft = false
     }
 
     struct PullRequestDetail: Hashable {
@@ -322,21 +323,24 @@ enum Orca {
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    /// Asks GitHub for the pull request of a branch. The outer nil means the question could not be
-    /// asked (gh missing, no token, no network); `.some(nil)` means GitHub answered and there is none.
-    static func pullRequest(slug: String, branch: String, account: String?) async -> PullRequest?? {
+    /// Asks GitHub for the pull requests of a branch, all of them: a branch reused after a merge
+    /// has several. Nil means the question could not be asked (gh missing, no token, no network);
+    /// an empty list means GitHub answered and there is none.
+    static func pullRequests(slug: String, branch: String, account: String?) async -> [PullRequest]? {
         guard let gh = ghExecutable else { return nil }
         let list = ["pr", "list", "--repo", slug, "--head", branch, "--state", "all",
-                    "--json", "number,state", "--limit", "10"]
+                    "--json", "number,state,isDraft", "--limit", "10"]
         guard let reply = await runGH(gh, list, account: account), reply.status == 0,
               let rows = (try? JSONSerialization.jsonObject(with: reply.out)) as? [[String: Any]] else { return nil }
-        let found = rows.compactMap { row -> PullRequest? in
+        return rows.compactMap { row -> PullRequest? in
             guard let number = row["number"] as? Int, let state = row["state"] as? String else { return nil }
-            return PullRequest(number: number, state: state.lowercased())
+            return PullRequest(number: number, state: state.lowercased(), draft: row["isDraft"] as? Bool ?? false)
         }
-        // A branch reused after a merge has several; the one still open is the one that matters.
-        let best = found.first { $0.state == "open" } ?? found.first { $0.state == "merged" } ?? found.first
-        return .some(best)
+    }
+
+    /// The one a session's badge is about: the one still open, else a merged one.
+    static func current(_ found: [PullRequest]) -> PullRequest? {
+        found.first { $0.state == "open" } ?? found.first { $0.state == "merged" } ?? found.first
     }
 
     /// Runs gh as the given account, or as gh's active one when none is given.
@@ -375,8 +379,7 @@ enum Orca {
         return "origin/pr/\(number)"
     }
 
-    /// A pull request's title, draft flag and dates, for the standup. Orca and the branch lookup
-    /// give only its number and state. Nil when gh is missing or GitHub did not answer.
+    /// A pull request's title, draft flag and dates, for the code review's sheet. Nil when gh is missing or GitHub did not answer.
     static func pullRequestDetail(_ url: URL, account: String?) async -> PullRequestDetail? {
         guard let gh = ghExecutable else { return nil }
         let args = ["pr", "view", url.absoluteString, "--json", "number,title,body,state,isDraft,createdAt,mergedAt,closedAt"]
@@ -417,8 +420,17 @@ enum Orca {
         /// The last push, or the developer's last comment or reply, whichever is later.
         let answeredAt: Date?
 
-        /// What came after the last push or reply: what the developer has not acted on yet.
-        var waiting: [Item] { items.filter { $0.at > (answeredAt ?? .distantPast) } }
+        /// What came after the last push or reply and still asks something of the developer.
+        /// An approval asks nothing, and it settles what the same reviewer wrote before it:
+        /// someone who commented and then approved is not waiting for an answer.
+        var waiting: [Item] {
+            var approvedAt: [String: Date] = [:]
+            for item in items where item.kind == .approved { approvedAt[item.author] = item.at }
+            return items.filter { item in
+                item.kind != .approved && item.at > (answeredAt ?? .distantPast)
+                    && item.at > (approvedAt[item.author] ?? .distantPast)
+            }
+        }
     }
 
     /// The GitHub logins of the accounts gh is signed in to, the developer's own. Empty when gh
@@ -434,19 +446,32 @@ enum Orca {
     private static let feedbackQuery = """
     query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) {
       number state reviewDecision author { login }
-      commits(last: 1) { nodes { commit { committedDate } } }
+      title body isDraft createdAt mergedAt closedAt mergeable
+      commits(last: 1) { nodes { commit { oid committedDate statusCheckRollup { contexts(first: 100) { nodes {
+        __typename ... on CheckRun { status conclusion } ... on StatusContext { state }
+      } } } } } }
       reviews(last: 50) { nodes { id state body submittedAt author { __typename login } } }
       comments(last: 50) { nodes { id body createdAt author { __typename login } } }
       reviewThreads(last: 80) { nodes { isResolved comments(last: 1) { nodes { id body createdAt author { __typename login } } } } }
     } } }
     """
 
-    /// Reads a pull request's reviews and comments. `mine` holds the developer's GitHub logins,
+    /// Everything one question to GitHub says about a pull request.
+    struct PullRequestReport: Hashable {
+        let detail: PullRequestDetail
+        let feedback: PullRequestFeedback
+        /// "passing", "failing" or "pending"; nil when the last commit has no checks.
+        let checks: String?
+        let conflict: Bool
+        let headSha: String?
+    }
+
+    /// Reads a pull request: its state, title and dates, the last commit's checks, whether it
+    /// conflicts, and its reviews and comments. `mine` holds the developer's GitHub logins,
     /// lowercased. Nil when gh is missing or GitHub did not answer.
-    static func pullRequestFeedback(_ url: URL, account: String?, mine: Set<String>) async -> PullRequestFeedback? {
-        // github.com/owner/name/pull/123
-        let parts = url.pathComponents.filter { $0 != "/" }
-        guard let gh = ghExecutable, parts.count >= 4, parts[2] == "pull", let number = Int(parts[3]) else { return nil }
+    static func pullRequestReport(slug: String, number: Int, account: String?, mine: Set<String>) async -> PullRequestReport? {
+        let parts = slug.split(separator: "/").map(String.init)
+        guard let gh = ghExecutable, parts.count == 2 else { return nil }
         let args = ["api", "graphql", "-F", "owner=\(parts[0])", "-F", "name=\(parts[1])", "-F", "number=\(number)",
                     "-f", "query=\(feedbackQuery)"]
         guard let reply = await runGH(gh, args, account: account), reply.status == 0,
@@ -500,9 +525,40 @@ enum Orca {
         let decision = pr["reviewDecision"] as? String
         let changes = decision == "CHANGES_REQUESTED" || (decision == nil && decisions.values.contains("CHANGES_REQUESTED"))
         let approved = !changes && (decision == "APPROVED" || (decision == nil && decisions.values.contains("APPROVED")))
-        return PullRequestFeedback(number: pr["number"] as? Int ?? number, state: state.lowercased(),
-                                   approved: approved, changesRequested: changes,
-                                   items: items.sorted { $0.at < $1.at }, answeredAt: answered)
+        let feedback = PullRequestFeedback(number: pr["number"] as? Int ?? number, state: state.lowercased(),
+                                           approved: approved, changesRequested: changes,
+                                           items: items.sorted { $0.at < $1.at }, answeredAt: answered)
+        func date(_ key: String) -> Date? { (pr[key] as? String).flatMap(iso.date) }
+        let detail = PullRequestDetail(number: feedback.number, title: pr["title"] as? String ?? "",
+                                       body: pr["body"] as? String ?? "", state: feedback.state,
+                                       draft: pr["isDraft"] as? Bool ?? false, createdAt: date("createdAt"),
+                                       mergedAt: date("mergedAt"), closedAt: date("closedAt"))
+        let commit = nodes(pr["commits"]).last?["commit"] as? [String: Any]
+        // Counted from the checks themselves. GitHub's own summary says "failure" for a gate
+        // that waits for somebody's approval, also while the tests are still running.
+        var failed = false, unfinished = false
+        let runs = nodes((commit?["statusCheckRollup"] as? [String: Any])?["contexts"])
+        for run in runs {
+            if run["__typename"] as? String == "CheckRun" {
+                if run["status"] as? String != "COMPLETED" { unfinished = true; continue }
+                switch run["conclusion"] as? String {
+                case "FAILURE", "TIMED_OUT", "STARTUP_FAILURE": failed = true
+                // Waiting for a person, not failed.
+                case "ACTION_REQUIRED": unfinished = true
+                // Success, skipped, neutral; and cancelled, which is usually a run a newer one replaced.
+                default: break
+                }
+            } else {
+                switch run["state"] as? String {
+                case "FAILURE", "ERROR": failed = true
+                case "PENDING", "EXPECTED": unfinished = true
+                default: break
+                }
+            }
+        }
+        let checks: String? = runs.isEmpty ? nil : failed ? "failing" : unfinished ? "pending" : "passing"
+        return PullRequestReport(detail: detail, feedback: feedback, checks: checks,
+                                 conflict: pr["mergeable"] as? String == "CONFLICTING", headSha: commit?["oid"] as? String)
     }
 
     /// "~/.claude-work" as a full path. Nil when it is not an existing directory.

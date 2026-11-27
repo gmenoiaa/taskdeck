@@ -13,7 +13,7 @@ struct IssueDetailView: View {
     @State private var loading = true
     @State private var error: String?
     @State private var entriesError: String?
-    enum Tab { case ticket, comments, sessions, time, notes }
+    enum Tab { case ticket, comments, sessions, pullRequests, time, notes }
     @State private var tab = Tab.ticket
     @State private var showLog = false
     @State private var showSession = false
@@ -53,6 +53,9 @@ struct IssueDetailView: View {
     private var isRedmine: Bool { project?.kind == .redmine }
     private var myHours: Double { myEntries.reduce(0) { $0 + $1.hours } }
     private var sessionCount: Int { task.map { store.sessions(of: $0).count } ?? 0 }
+    private var pullRequestCount: Int { task?.pullRequestList.count ?? 0 }
+    /// With sessions and none yet, the tab is where one is added by its link.
+    private var showsPullRequests: Bool { pullRequestCount > 0 || sessionCount > 0 }
     private var comments: [TicketDetail.Comment] {
         (detail?.comments ?? []).filter { !$0.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
@@ -65,6 +68,11 @@ struct IssueDetailView: View {
                 Text(detail == nil ? "Comments" : "Comments (\(comments.count))").tag(Tab.comments)
                 // Only there when the task has sessions.
                 if sessionCount > 0 { Text("Sessions (\(sessionCount))").tag(Tab.sessions) }
+                // "PRs": a segmented control gives every tab the width of its longest label, and
+                // six tabs of "Pull requests (2)" are wider than the sheet.
+                if showsPullRequests {
+                    Text(pullRequestCount > 0 ? "PRs (\(pullRequestCount))" : "PRs").tag(Tab.pullRequests)
+                }
                 Text("Time").tag(Tab.time)
                 Text("Notes").tag(Tab.notes)
             }
@@ -127,6 +135,8 @@ struct IssueDetailView: View {
                     case .sessions:
                         // Saved in the app, so this shows even when the ticket cannot be fetched.
                         SessionsList(taskId: taskId)
+                    case .pullRequests:
+                        PullRequestsList(taskId: taskId)
                     case .notes:
                         notesSection
                     }
@@ -179,6 +189,7 @@ struct IssueDetailView: View {
         guard event.modifierFlags.intersection([.command, .option, .control]).isEmpty, !showEstimates else { return false }
         var tabs: [Tab] = [.ticket, .comments]
         if sessionCount > 0 { tabs.append(.sessions) }
+        if showsPullRequests { tabs.append(.pullRequests) }
         tabs += [.time, .notes]
         let at = tabs.firstIndex(of: tab) ?? 0
         switch event.keyCode {
@@ -233,7 +244,7 @@ struct IssueDetailView: View {
                 content
             }
         }
-        .frame(width: 640, height: 700)
+        .frame(width: 720, height: 700)
         .background(KeyCatcher(field: nil, handler: key))
         // Links inside the ticket text and comments follow the space's browser too.
         .environment(\.openURL, OpenURLAction { url in
@@ -269,6 +280,9 @@ struct IssueDetailView: View {
         // The last session was removed while its tab was open.
         .onChange(of: sessionCount) { _, count in
             if count == 0, tab == .sessions { tab = .ticket }
+        }
+        .onChange(of: showsPullRequests) { _, shown in
+            if !shown, tab == .pullRequests { tab = .ticket }
         }
         .onChange(of: task == nil) { _, gone in
             if gone { dismiss() }
