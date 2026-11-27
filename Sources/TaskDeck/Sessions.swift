@@ -24,7 +24,13 @@ struct AgentSession: Identifiable, Codable, Hashable {
     /// those sessions were all Orca's.
     var runner: String?
 
+    /// `Machine.id` of the Mac that runs it, for a session another Mac published; nil for this
+    /// Mac's own, which is every session saved here.
+    var host: String?
+
     var runnerId: String { runner ?? OrcaRunner.id }
+    /// Runs on another Mac: shown from its published status, never opened, stopped or removed from here.
+    var isRemote: Bool { host != nil && host != Machine.id }
 }
 
 /// A repository a runner can start sessions in.
@@ -64,7 +70,8 @@ struct SessionWorktree: Hashable {
 
 /// What a runner says about a session's worktree right now. Never saved: the runner is the source of truth.
 struct SessionStatus: Hashable {
-    enum Kind { case working, yourTurn, prOpen, prMerged, prClosed, idle, gone }
+    /// Raw values are saved in the host records other Macs read; never rename one.
+    enum Kind: String, Codable { case working, yourTurn, prOpen, prMerged, prClosed, idle, gone }
     var kind: Kind
     /// The tool the agent is running, while it works.
     var tool: String?
@@ -268,7 +275,11 @@ enum Runners {
         id.flatMap(find) ?? find(defaultId) ?? all[0]
     }
 
-    static func of(_ session: AgentSession) -> (any SessionRunner)? { find(session.runnerId) }
+    /// The runner that holds the session on this Mac; nil for one that runs on another Mac, whose
+    /// ids mean nothing here.
+    static func of(_ session: AgentSession) -> (any SessionRunner)? {
+        session.isRemote ? nil : find(session.runnerId)
+    }
 
     /// Whether any session can be started or watched on this Mac.
     static var anyAvailable: Bool { all.contains { $0.isAvailable } }

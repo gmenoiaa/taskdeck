@@ -12,6 +12,8 @@ struct SyncedSettings: Codable, Equatable {
     var clearedWaiting: [String]?
     var ignoredAssigned: [String]?
     var sessionAgent: String?
+    /// The Mac queued tasks run on; nil for the Mac they were queued on.
+    var queueHost: String?
 }
 
 extension Project {
@@ -86,7 +88,8 @@ extension AppStore.Snapshot {
     var settings: SyncedSettings {
         SyncedSettings(singleTimer: singleTimer, claudeModel: claudeModel, aiInstructions: aiInstructions,
                        autoLogComment: autoLogComment, notify: notify, codeReviewPrompt: codeReviewPrompt,
-                       clearedWaiting: clearedWaiting, ignoredAssigned: ignoredAssigned, sessionAgent: sessionAgent)
+                       clearedWaiting: clearedWaiting, ignoredAssigned: ignoredAssigned, sessionAgent: sessionAgent,
+                       queueHost: queueHost)
     }
 
     /// Every record that follows the user, by key: "task:<id>", "space:<id>", "goal:<id>",
@@ -102,6 +105,7 @@ extension AppStore.Snapshot {
         for (space, note) in standups ?? [:] { put("standup:\(space)", note) }
         put("columns", columns ?? [])
         put("settings", settings)
+        for (host, state) in hosts ?? [:] { put("host:\(host)", state) }
         return out
     }
 
@@ -135,6 +139,11 @@ extension AppStore.Snapshot {
         let notes = Dictionary(try values("standup:", as: StandupNote.self), uniquingKeysWith: { first, _ in first })
         out.standups = notes.isEmpty ? nil : notes
 
+        // Every Mac's published sessions, except this Mac's own: only this Mac says what runs here.
+        var hostStates = try Dictionary(values("host:", as: HostState.self), uniquingKeysWith: { first, _ in first })
+        hostStates[Machine.id] = hosts?[Machine.id]
+        out.hosts = hostStates.isEmpty ? nil : hostStates
+
         if let data = merged.records["columns"] {
             let list = try Self.recordDecoder.decode([BoardColumn].self, from: data)
             out.columns = list.isEmpty ? nil : list
@@ -150,6 +159,7 @@ extension AppStore.Snapshot {
             out.clearedWaiting = s.clearedWaiting
             out.ignoredAssigned = s.ignoredAssigned
             out.sessionAgent = s.sessionAgent
+            out.queueHost = s.queueHost
         }
         out.schema = merged.schema
         out.sync = merged.meta

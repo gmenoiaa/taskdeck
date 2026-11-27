@@ -6,12 +6,19 @@ import AppKit
 extension AppStore {
     var queueColumn: BoardColumn? { columns.first { $0.role == .agents } }
 
-    /// Tasks waiting their turn, first in line first. One that needs a repository or met an error is
-    /// not waiting: it is shown on its card and left alone until the user acts.
+    /// The Mac a task entering the queue is given: the chosen one while it is known, else this Mac.
+    var queueTarget: String {
+        guard let chosen = queueHost, chosen == Machine.id || hosts[chosen] != nil else { return Machine.id }
+        return chosen
+    }
+
+    /// Tasks waiting their turn on this Mac, first in line first. One that needs a repository or met
+    /// an error is not waiting: it is shown on its card and left alone until the user acts. One
+    /// given to another Mac waits there; a task queued before tasks had a Mac counts as this Mac's.
     var queueWaiting: [TaskItem] {
         guard let column = queueColumn else { return [] }
         return tasks.filter {
-            $0.status == column.id && !$0.archived && $0.queueNote == nil
+            $0.status == column.id && !$0.archived && $0.queueNote == nil && ($0.runOn ?? Machine.id) == Machine.id
                 // Started already and not moved on (a board without an In progress column).
                 && !($0.sessions ?? []).contains { $0.queued == true }
         }
@@ -42,6 +49,16 @@ extension AppStore {
         save()
     }
 
+    /// Gives a queued task to another Mac, or back to this one. A note from the last Mac goes, so the new one tries afresh.
+    func setRunOn(_ host: String, for id: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].runOn = host
+        tasks[i].queueNote = nil
+        tasks[i].queueRepoId = nil
+        save()
+        Task { await runAgentQueue() }
+    }
+
     /// The repository picked by hand for a task the queue could not place.
     func setQueueRepository(_ repoId: String, for id: UUID) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
@@ -60,8 +77,15 @@ extension AppStore {
 
     /// Starts waiting tasks while there are free slots.
     func runAgentQueue() async {
+        // A Mac given queued tasks without any runner says so on the cards, which every Mac sees.
+        if !Runners.anyAvailable {
+            for waiting in queueWaiting {
+                setQueueNote("\(machineName) has neither Orca nor Claude Code, so it cannot start agents. Give the task to another Mac.", for: waiting.id)
+            }
+            return
+        }
         // Without a runner's answer the number of working sessions is unknown, so nothing is started.
-        guard Runners.anyAvailable, !processingQueue, let column = queueColumn, sessionStatuses != nil else { return }
+        guard !processingQueue, let column = queueColumn, sessionStatuses != nil else { return }
         var free = agentQueueLimit - queueBusy
         guard free > 0, !queueWaiting.isEmpty else { return }
         processingQueue = true
