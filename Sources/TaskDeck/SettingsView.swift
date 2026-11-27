@@ -393,6 +393,15 @@ private struct AgentSettings: View {
                     Text("A task dragged into that column is started as an agent session in its space's runner, without the Start session sheet, and then moves to In progress. Nothing starts by itself until the column exists.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
+                    if store.knownHosts.count > 1 {
+                        Picker("Queued tasks run on", selection: Binding(
+                            get: { store.queueHost ?? "" }, set: { store.queueHost = $0.isEmpty ? nil : $0; store.save() })) {
+                            Text("The Mac they are queued on").tag("")
+                            ForEach(store.knownHosts, id: \.id) { Text($0.name).tag($0.id) }
+                        }
+                        Text("A task dragged into the queue goes to this Mac, and only that Mac starts it. Change one task with Run on in its menu. Each Mac uses its own repositories and Claude homes for a space; one that lacks them says so on the card.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Stepper("Sessions working at once: \(store.agentQueueLimit)",
                             value: $store.agentQueueLimit, in: 1...6)
                     Toggle("Run without asking for permission", isOn: $store.agentQueueSkipPermissions)

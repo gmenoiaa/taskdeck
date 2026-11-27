@@ -1017,8 +1017,17 @@ private struct QueueBadge: View {
     var compact = false
     @State private var picking = false
 
+    /// The task is another Mac's to start: its repositories, retries and slots are there.
+    private var elsewhere: String? {
+        guard let host = task.runOn, host != Machine.id else { return nil }
+        return store.hostName(host)
+    }
+
     var body: some View {
-        if task.queueNote == TaskItem.needsRepository {
+        if task.queueNote == TaskItem.needsRepository, let elsewhere {
+            chip("Pick repository on \(elsewhere)", icon: "questionmark.folder", color: .orange)
+                .help("The ticket does not say which repository it is about. Pick one on \(elsewhere), or give the task to this Mac with Run on in its menu.")
+        } else if task.queueNote == TaskItem.needsRepository {
             Button { picking = true } label: {
                 chip("Pick repository", icon: "questionmark.folder", color: .orange)
             }
@@ -1036,6 +1045,9 @@ private struct QueueBadge: View {
         } else if (task.sessions ?? []).contains(where: { $0.queued == true }) {
             // Started; the session badge next to this one says how it is going.
             EmptyView()
+        } else if let elsewhere {
+            chip("Queued on \(elsewhere)", icon: "hourglass", color: .secondary)
+                .help("\(elsewhere) starts it when it has a free slot and TaskDeck is open there. Change it with Run on in the task's menu.")
         } else {
             chip("Queued", icon: "hourglass", color: .secondary)
                 .help("Waiting for a free slot. Up to \(store.agentQueueLimit) queued sessions work at once.")
@@ -1558,6 +1570,15 @@ struct TaskCard: View {
             }
             Divider()
             Button("Start agent session…") { startingSession = true }
+            if task.status == store.queueColumn?.id, store.knownHosts.count > 1 {
+                Menu("Run on") {
+                    ForEach(store.knownHosts, id: \.id) { host in
+                        // A toggle, so the menu shows a checkmark on the current Mac.
+                        Toggle(host.name, isOn: Binding(get: { (task.runOn ?? Machine.id) == host.id },
+                                                        set: { if $0 { store.setRunOn(host.id, for: task.id) } }))
+                    }
+                }
+            }
             if let session = store.headlineSession(of: task), Runners.of(session)?.capabilities.contains(.reveal) == true {
                 Button("Open session in \(Runners.label(of: session))") { Task { await Runners.reveal(session) } }
             }

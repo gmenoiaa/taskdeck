@@ -28,8 +28,9 @@ enum PeerCommand {
         let machine: String
         init(path: String) {
             self.path = path
-            // Not this Mac's id: the app on this Mac must see the file as another Mac.
-            machine = "file:" + path
+            // Not this Mac's id: the app on this Mac must see the file as another Mac. Run with
+            // TASKDECK_MACHINE_ID to also publish and keep host records as that Mac.
+            machine = ProcessInfo.processInfo.environment["TASKDECK_MACHINE_ID"] ?? ("file:" + path)
         }
 
         func merge(_ theirs: SyncDocument?) throws -> PeerMessage {

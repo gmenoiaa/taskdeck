@@ -11,6 +11,8 @@ enum SyncSchema {
 /// defaults, never in the data file, which is shared.
 enum Machine {
     static var id: String {
+        // A test peer run on the same Mac (`TaskDeck serve`) must be another Mac to the app.
+        if let given = ProcessInfo.processInfo.environment["TASKDECK_MACHINE_ID"], !given.isEmpty { return given }
         let key = "machineId"
         if let saved = UserDefaults.standard.string(forKey: key) { return saved }
         let made = UUID().uuidString

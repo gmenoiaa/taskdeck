@@ -343,6 +343,9 @@ struct TaskItem: Identifiable, Codable, Hashable {
     static let needsRepository = "repository"
     /// The goal this task belongs to; a task is in one goal at most, so totals never count twice.
     var goalId: UUID?
+    /// `Machine.id` of the Mac whose agent queue starts this task, set when it enters the queue.
+    /// Only that Mac starts it, so a task synced to several Macs starts once. Synced.
+    var runOn: String?
     var order: Double = 0
     /// The latest column changes, oldest first. Only moves made since this was added are known.
     var moves: [ColumnMove]?

@@ -62,6 +62,12 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
   edits. `TaskDeck serve <file> [port]` and `TaskDeck sync <file> <peer>` are a data-file peer for
   testing on one Mac; run them from the installed app (`/Applications/TaskDeck.app/Contents/MacOS/TaskDeck`),
   since the firewall drops an unsigned debug build.
+- Each Mac publishes its own sessions as the record `host:<Machine.id>` (`Hosts.swift`), which
+  only that Mac writes; `applying` never takes this Mac's own from another. Other Macs' sessions
+  come back as `AgentSession` with `host` set (`isRemote`): `Runners.of` returns nil for them, so
+  nothing opens, stops or removes them here, and notifications skip them. A queued task carries
+  `runOn`, set when it enters the queue; only that Mac's queue starts it. `TASKDECK_MACHINE_ID`
+  gives a test peer on the same Mac its own identity.
 - `swift test` runs the tests in `Tests/TaskDeckTests`.
 - The user sees "spaces"; in code and in `data.json` a space is still a `Project` (`projects`,
   `projectId`). Keep the old names in code so existing files load, and write "space" in UI text.

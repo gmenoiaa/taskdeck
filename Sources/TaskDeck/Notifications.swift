@@ -186,7 +186,8 @@ extension AppStore {
         var seen: [String: SessionStatus.Kind] = [:]
         var stopped = false
         for task in tasks where !task.archived {
-            for session in sessions(of: task) {
+            // Only this Mac's sessions: another Mac notifies about its own, so each stop is told once.
+            for session in sessions(of: task) where !session.isRemote {
                 guard let id = session.worktreeId, let status = status(of: session) else { continue }
                 seen[id] = status.kind
                 guard let before = sessionKinds[id], before != status.kind, before == .working else { continue }

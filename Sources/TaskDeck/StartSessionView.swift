@@ -590,7 +590,7 @@ struct SessionsList: View {
                             Text(session.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                             SessionBadge(status: status, count: 1)
                         }
-                        Text("\(agentLabel(session))\(session.claudeHome.map { " (\($0))" } ?? "")\(session.githubAccount.map { " · gh \($0)" } ?? "") · \(session.repoName) · \(Self.started.string(from: session.startedAt))")
+                        Text("\(session.isRemote ? "On \(store.hostName(session.host)) · " : "")\(agentLabel(session))\(session.claudeHome.map { " (\($0))" } ?? "")\(session.githubAccount.map { " · gh \($0)" } ?? "") · \(session.repoName) · \(Self.started.string(from: session.startedAt))")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         // What the agent last said, so the user can decide without opening the runner.
                         if let status, status.kind != .working, let message = status.lastMessage, !message.isEmpty {
@@ -618,7 +618,8 @@ struct SessionsList: View {
                         .help("Remove the worktree in \(runner): its checkout is deleted.")
                     }
                     // A worktree matched by its name would only be found again on the next refresh.
-                    if !session.agent.isEmpty {
+                    // Another Mac's session is that Mac's to forget.
+                    if !session.agent.isEmpty, !session.isRemote {
                         Button { store.removeSession(session.id, from: taskId) } label: {
                             Image(systemName: "xmark")
                         }

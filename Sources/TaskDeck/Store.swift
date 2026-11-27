@@ -185,6 +185,9 @@ final class AppStore {
         /// This Mac's sync: whether it is on, and the other Macs by tailnet name. Not synced.
         var syncEnabled: Bool?
         var syncPeers: [String]?
+        /// What each Mac publishes about its sessions, by `Machine.id`, this Mac's own included.
+        var hosts: [String: HostState]?
+        var queueHost: String?
     }
 
     /// Stamps of the synced records, and the records as last saved, to see what a save changes.
@@ -194,6 +197,12 @@ final class AppStore {
     var syncEnabled = false
     var syncPeers: [String] = []
     var peerStatus: [String: PeerStatus] = [:]
+    /// What the user's other Macs publish about their sessions, by `Machine.id` (`Hosts.swift`).
+    var hosts: [String: HostState] = [:]
+    /// The Mac queued tasks run on; nil for the Mac they were queued on. Synced.
+    var queueHost: String?
+    /// This Mac's sessions as last published to the others; saved, so a restart does not republish.
+    @ObservationIgnored var publishedHost: HostState?
     /// Why this Mac is not answering other Macs; nil while it listens.
     var syncServerProblem: String?
     var syncListening: String?
@@ -478,6 +487,9 @@ final class AppStore {
         sessionAgent = snap.sessionAgent ?? AgentKind.claude.id
         syncEnabled = snap.syncEnabled ?? false
         syncPeers = snap.syncPeers ?? []
+        hosts = (snap.hosts ?? [:]).filter { $0.key != Machine.id }
+        queueHost = snap.queueHost
+        publishedHost = snap.hosts?[Machine.id]
     }
 
     /// What a data file holds, and why it must not be saved over: it comes from a newer TaskDeck,
@@ -534,6 +546,10 @@ final class AppStore {
                             sessionRunner: sessionRunner, sessionAgent: sessionAgent)
         snap.syncEnabled = syncEnabled ? true : nil
         snap.syncPeers = syncPeers.isEmpty ? nil : syncPeers
+        var allHosts = hosts
+        allHosts[Machine.id] = publishedHost
+        snap.hosts = allHosts.isEmpty ? nil : allHosts
+        snap.queueHost = queueHost
         snap.schema = SyncSchema.current
         snap.sync = syncMeta
         return snap
@@ -598,6 +614,7 @@ final class AppStore {
                 task.order = nextOrder
                 task.queueNote = nil
                 task.noteMove(to: task.status)
+                if role(of: task.status) == .agents { task.runOn = queueTarget }
             }
             tasks[i] = task
             if role(of: task.status) == .done { closeEntries(at: i) }
@@ -633,6 +650,7 @@ final class AppStore {
         }
         // Dragging a task back into the queue is how a failed start is tried again.
         tasks[i].queueNote = nil
+        if role(of: columnId) == .agents { tasks[i].runOn = queueTarget }
         if role(of: columnId) == .done { closeEntries(at: i) }
         save()
     }
@@ -1033,6 +1051,7 @@ final class AppStore {
         publish(trees)
         if await askGitHub(trees, limit: force ? 40 : 3) { publish(trees) }
         recordPullRequests(trees)
+        publishHostState()
     }
 
     /// Adds the pull requests Orca and the branch lookups report to their tasks' lists. Nothing is
@@ -1336,7 +1355,14 @@ final class AppStore {
 
     /// A task's sessions: those started here, then worktrees created in Orca that carry its reference.
     func sessions(of task: TaskItem) -> [AgentSession] {
-        (task.sessions ?? []) + (linkedSessions[task.id] ?? [])
+        (task.sessions ?? []) + (linkedSessions[task.id] ?? []) + remoteSessions(of: task)
+    }
+
+    /// The task's sessions on the user's other Macs, as they published them.
+    func remoteSessions(of task: TaskItem) -> [AgentSession] {
+        hosts.sorted { $0.key < $1.key }.flatMap { host, state in
+            (state.sessions[task.id.uuidString] ?? []).map { $0.session(host: host) }
+        }
     }
 
     /// The runner a space's new sessions start in: the space's own choice, else the app's.
@@ -1353,6 +1379,9 @@ final class AppStore {
 
     /// The live status of a session; nil when its runner did not answer or the session has no worktree id.
     func status(of session: AgentSession) -> SessionStatus? {
+        if session.isRemote, let host = session.host {
+            return hosts[host]?.sessions.values.lazy.flatMap { $0 }.first { $0.id == session.id }?.status
+        }
         guard let all = sessionStatuses, let id = session.worktreeId,
               answeredRunners.contains(session.runnerId) else { return nil }
         return all[id] ?? .gone
