@@ -29,7 +29,7 @@ struct SyncMeta: Codable, Equatable {
 /// The part of the data that follows the user between Macs, one record at a time. A record's
 /// value is its JSON as saved, with this Mac's own fields left out, so two copies can be compared
 /// and the newer one chosen without knowing what kind of record it is.
-struct SyncDocument: Equatable {
+struct SyncDocument: Codable, Equatable {
     var schema: Int
     var records: [String: Data] = [:]
     var meta = SyncMeta()

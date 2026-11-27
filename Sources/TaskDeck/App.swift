@@ -7,7 +7,9 @@ struct TaskDeckApp: App {
 
     init() {
         // Before the store: a command run from the terminal must not load or touch the user's data.
-        if let status = MergeCommand.runIfAsked(CommandLine.arguments) { exit(status) }
+        if let status = MergeCommand.runIfAsked(CommandLine.arguments) ?? PeerCommand.runIfAsked(CommandLine.arguments) {
+            exit(status)
+        }
         _store = State(initialValue: AppStore())
     }
 

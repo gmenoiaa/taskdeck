@@ -29,9 +29,11 @@ extension Project {
         return copy
     }
 
-    /// A space that came from the other copy, with this Mac's own fields from `local`.
+    /// A space that came from the other copy, with this Mac's own fields from `local`, or none
+    /// when this Mac has no such space yet: they are never taken from the other copy, which could
+    /// otherwise point this Mac at a folder, a Claude home or a browser of its choosing.
     func keepingMachineFields(of local: Project?) -> Project {
-        guard let local else { return self }
+        guard let local else { return synced }
         var copy = self
         copy.orcaRepoId = local.orcaRepoId
         copy.orcaRepoIds = local.orcaRepoIds
@@ -55,8 +57,10 @@ extension TaskItem {
         return copy
     }
 
+    /// As for spaces: a task new to this Mac starts with no agent sessions here, whatever the
+    /// other copy says. A session names a worktree that this Mac opens in a terminal.
     func keepingMachineFields(of local: TaskItem?) -> TaskItem {
-        guard let local else { return self }
+        guard let local else { return synced }
         var copy = self
         copy.sessions = local.sessions
         copy.queueRepoId = local.queueRepoId

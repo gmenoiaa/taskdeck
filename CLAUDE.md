@@ -53,6 +53,15 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
   that edits data needs no stamping of its own; it only has to call `save()`.
 - A running timer belongs to the Mac that started it (`TimeEntry.machine`): stopping all, quitting
   and the away cut-off touch only this Mac's.
+- Macs sync over Tailscale (`PeerSync.swift`, `PeerNetwork.swift`, `PeerProtocol.swift`): one
+  signed round trip per sync, on port 47621 of this Mac's Tailscale address only. Every request
+  and answer is signed with the pairing secret (Keychain `sync-secret`), with a time window, a
+  random value per request and a replay check; keep all of that on any new route. The listener
+  uses BSD sockets: a Network framework listener on the Tailscale address never completed its
+  connections. Merged-in records are saved with the sender's stamps (`mergeIn`), never as local
+  edits. `TaskDeck serve <file> [port]` and `TaskDeck sync <file> <peer>` are a data-file peer for
+  testing on one Mac; run them from the installed app (`/Applications/TaskDeck.app/Contents/MacOS/TaskDeck`),
+  since the firewall drops an unsigned debug build.
 - `swift test` runs the tests in `Tests/TaskDeckTests`.
 - The user sees "spaces"; in code and in `data.json` a space is still a `Project` (`projects`,
   `projectId`). Keep the old names in code so existing files load, and write "space" in UI text.
