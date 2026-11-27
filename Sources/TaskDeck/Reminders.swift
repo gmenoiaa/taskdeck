@@ -129,9 +129,9 @@ extension AppStore {
                 guard notify.reminders, let reminder = tasks[i].reminders?[r] else { continue }
                 let task = tasks[i]
                 if reminder.note.isEmpty {
-                    Notifier.send(title: "Reminder", body: label(task), reminder: (task.id, reminder.id))
+                    Notifier.send(kind: .reminders, title: "Reminder", body: label(task), reminder: (task.id, reminder.id))
                 } else {
-                    Notifier.send(title: "Reminder", subtitle: label(task), body: reminder.note,
+                    Notifier.send(kind: .reminders, title: "Reminder", subtitle: label(task), body: reminder.note,
                                   reminder: (task.id, reminder.id))
                 }
             }

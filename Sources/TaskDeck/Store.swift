@@ -29,7 +29,10 @@ final class AppStore {
     @ObservationIgnored var processingQueue = false
     /// Which notifications are sent.
     var notify = NotificationSettings() {
-        didSet { Notifier.sound = notify.sound }
+        didSet {
+            Notifier.sound = notify.sound
+            Notifier.channelSettings = notify.channels
+        }
     }
     /// What each session was doing at the last look, to notice when it stops or its pull request closes.
     @ObservationIgnored var sessionKinds: [String: SessionStatus.Kind] = [:]
@@ -138,7 +141,9 @@ final class AppStore {
     /// Saved, so a Mac that shut down while asleep still asks on the next launch.
     @ObservationIgnored private(set) var awaySince: Date?
     /// What currently keeps the user away. They are back when it is empty.
-    @ObservationIgnored private var awayReasons: Set<String> = []
+    @ObservationIgnored private var awayReasons: Set<String> = [] {
+        didSet { UserActivity.screenAway = !awayReasons.isEmpty }
+    }
     @ObservationIgnored private var askingAboutAway = false
 
     private struct Snapshot: Codable {
@@ -185,6 +190,7 @@ final class AppStore {
         load()
         // Said outright: whether `didSet` runs for values set during init is easy to get wrong.
         Notifier.sound = notify.sound
+        Notifier.channelSettings = notify.channels
         loadAssigned()
         Notifier.setUp()
         Notifier.onStart = { [weak self] id, since in self?.startTimer(id, from: since) }

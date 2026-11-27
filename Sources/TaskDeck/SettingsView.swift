@@ -155,6 +155,88 @@ private struct GeneralSettings: View {
     }
 }
 
+/// A channel besides this Mac's banners: on or off, its keys, the kinds it gets, and a test of its own.
+private struct ChannelSection: View {
+    let channel: any NotificationChannel
+    @Binding var settings: ChannelSettings
+    @State private var user = ""
+    @State private var token = ""
+    @State private var testing = false
+    @State private var result: (ok: Bool, text: String)?
+
+    var body: some View {
+        Section(channel.label) {
+            Toggle("Send notifications to \(channel.label)", isOn: $settings.enabled)
+            if channel.id == PushoverChannel.id {
+                SecureField("User key", text: $user, prompt: Text("From pushover.net, top of the page"))
+                    .onChange(of: user) { _, value in Keychain.set(value.trimmingCharacters(in: .whitespaces), account: PushoverChannel.userAccount) }
+                SecureField("Application token", text: $token, prompt: Text("From an application made at pushover.net/apps"))
+                    .onChange(of: token) { _, value in Keychain.set(value.trimmingCharacters(in: .whitespaces), account: PushoverChannel.tokenAccount) }
+                Text("Install the Pushover app on the phone and sign in to the same account. Both keys are stored in the macOS Keychain, not in the data file.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if settings.enabled {
+                ForEach(Notice.Kind.choosable) { kind in
+                    Toggle(kind.label, isOn: Binding(
+                        get: { settings.kinds.contains(kind.rawValue) },
+                        set: { on in
+                            settings.kinds.removeAll { $0 == kind.rawValue }
+                            if on { settings.kinds.append(kind.rawValue) }
+                        }))
+                }
+                Text("Only what is also turned on above is sent; these choose which of those go to \(channel.label) too. They are sent only while TaskDeck is running on this Mac and the Mac is awake.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Only when I am away from this Mac", isOn: Binding(
+                    get: { settings.awayOnly }, set: { settings.onlyWhenAway = $0 ? true : nil }))
+                if settings.awayOnly {
+                    Picker("Away after", selection: Binding(
+                        get: { settings.idleMinutes }, set: { settings.awayMinutes = $0 })) {
+                        ForEach([2, 5, 10, 15, 30], id: \.self) { Text("\($0) minutes without using it").tag($0) }
+                    }
+                    Text("Away means the screen is locked or off, or no key was pressed and the pointer did not move for that long. While you are at the Mac, only the banner here shows. A Mac that is asleep sends nothing.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text(channel.privacyNote).font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Send a test to \(channel.label)") { Task { await test() } }
+                    .disabled(testing || !configured)
+                if testing { ProgressView().controlSize(.small) }
+                if let result {
+                    Label(result.text, systemImage: result.ok ? "checkmark.circle" : "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(result.ok ? Color.green : Color.red)
+                        .lineLimit(2)
+                }
+            }
+        }
+        .onAppear {
+            if channel.id == PushoverChannel.id {
+                user = Keychain.get(account: PushoverChannel.userAccount) ?? ""
+                token = Keychain.get(account: PushoverChannel.tokenAccount) ?? ""
+            }
+        }
+    }
+
+    /// From the fields as typed: the Keychain is written in `onChange`, after the view has already
+    /// been redrawn for the keystroke, so asking it here would lag one keystroke behind.
+    private var configured: Bool {
+        guard channel.id == PushoverChannel.id else { return channel.isConfigured }
+        return !user.trimmingCharacters(in: .whitespaces).isEmpty && !token.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Straight to the channel, whether it is on or not, so the keys can be checked before turning it on.
+    private func test() async {
+        testing = true
+        defer { testing = false }
+        do {
+            try await channel.deliver(Notice(kind: .test, title: "TaskDeck", body: "Notifications reach \(channel.label)."))
+            result = (true, "Sent.")
+        } catch {
+            result = (false, error.localizedDescription)
+        }
+    }
+}
+
 private struct NotificationSettingsTab: View {
     @Environment(AppStore.self) private var store
     @State private var sent: [Notifier.Sent] = []
@@ -223,6 +305,11 @@ private struct NotificationSettingsTab: View {
                 Text("Set from a card's menu or the task's details. One that comes due while the Mac is asleep or locked is sent when you are back. With this off, a due reminder still shows in the bell's list.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            ForEach(Notifier.channels, id: \.id) { channel in
+                ChannelSection(channel: channel, settings: Binding(
+                    get: { store.notify.channels[channel.id] ?? ChannelSettings() },
+                    set: { store.notify.channels[channel.id] = $0 }))
+            }
             Section("Dock badge") {
                 Picker("Shows", selection: $store.notify.badge) {
                     Text("Things waiting for me").tag(NotificationSettings.DockBadge.waiting)
@@ -238,8 +325,8 @@ private struct NotificationSettingsTab: View {
             }
             Section("Check") {
                 LabeledContent("If nothing appears, look in System Settings → Notifications, and at Focus.") {
-                    Button("Send a test") {
-                        Notifier.send(title: "TaskDeck", body: "Notifications are working.")
+                    Button(store.notify.channels.values.contains(where: \.enabled) ? "Send a test everywhere" : "Send a test") {
+                        Notifier.send(kind: .test, title: "TaskDeck", body: "Notifications are working.")
                         sent = Notifier.recent()
                     }
                 }
@@ -257,7 +344,7 @@ private struct NotificationSettingsTab: View {
                             }
                             Text(item.body).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                             if let problem = item.problem {
-                                Text("macOS refused it: \(problem)").font(.caption).foregroundStyle(.red)
+                                Text(problem).font(.caption).foregroundStyle(.red)
                             }
                         }
                     }

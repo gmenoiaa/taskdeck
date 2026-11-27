@@ -67,6 +67,11 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
   `--settings` SessionStart hook that writes `export GH_TOKEN="$(gh auth token --user …)"` to the
   session's env file: the command, never the token, since that file stays on disk world-readable.
 - Secrets go in the Keychain (service `local.taskdeck`), never in `data.json` or the repository.
+- Every notification goes through `Notifier.send(kind:…)`: a banner on this Mac, and the same text
+  to each `NotificationChannel` (`NotificationChannels.swift`) that is on and takes that kind
+  (`NotificationSettings.channels`). A new service is one type in `Notifier.channels`; its keys go
+  in the Keychain, and its settings text says what leaves the Mac. Buttons (Snooze, Start Timer)
+  exist only on the Mac banner.
 - macOS 26 Liquid Glass (`GlassEffectContainer`, `.buttonStyle(.glass)`, `.glassEffect`,
   `ToolbarSpacer`) is always behind `if #available(macOS 26, *)` with a pre-26 fallback. Shared
   helpers live in `Glass.swift`.

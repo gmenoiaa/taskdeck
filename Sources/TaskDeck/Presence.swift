@@ -14,14 +14,27 @@ struct BackdateOffer: Equatable {
     let made: Date
 }
 
-/// Forgetting to start the timer: knowing when the user is at the Mac, reminding when no timer
-/// runs, and letting a late start count from when the work really began.
-extension AppStore {
+/// Whether the user is at this Mac, readable from anywhere: the notifier asks it off the main actor.
+enum UserActivity {
     /// Seconds since the last key press or pointer movement, in any app. Needs no permission.
-    private static var idleSeconds: TimeInterval {
+    static var idleSeconds: TimeInterval {
         guard let any = CGEventType(rawValue: ~0) else { return 0 }
         return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: any)
     }
+
+    /// Screen locked, display off or the Mac going to sleep. Kept by the store from its away reasons.
+    nonisolated(unsafe) static var screenAway = false
+
+    /// Away: the screen is locked or off, or nothing was touched for `idleMinutes`.
+    static func isAway(idleMinutes: Int) -> Bool {
+        screenAway || idleSeconds >= TimeInterval(idleMinutes * 60)
+    }
+}
+
+/// Forgetting to start the timer: knowing when the user is at the Mac, reminding when no timer
+/// runs, and letting a late start count from when the work really began.
+extension AppStore {
+    private static var idleSeconds: TimeInterval { UserActivity.idleSeconds }
 
     /// Called every few seconds: five quiet minutes, a locked screen or sleep end a sitting, and
     /// the next sign of life starts a new one.
@@ -82,11 +95,11 @@ extension AppStore {
         let spent = Fmt.short(now.timeIntervalSince(since))
         if let task = likelyTask {
             let name = "\(task.displayRef) \(task.title)".trimmingCharacters(in: .whitespaces)
-            Notifier.send(title: "No timer running",
+            Notifier.send(kind: .time, title: "No timer running",
                           body: "You have been at the Mac for \(spent). An agent is active on \(name).",
                           startTask: task.id, since: since)
         } else {
-            Notifier.send(title: "No timer running",
+            Notifier.send(kind: .time, title: "No timer running",
                           body: "You have been at the Mac for \(spent) with nothing being tracked.")
         }
     }
