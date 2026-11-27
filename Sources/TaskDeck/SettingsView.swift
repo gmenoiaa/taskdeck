@@ -281,20 +281,32 @@ private struct AgentSettings: View {
     var body: some View {
         @Bindable var store = store
         Form {
+            Section("Sessions") {
+                if Runners.hasChoice {
+                    Picker("Run sessions in", selection: $store.sessionRunner) {
+                        ForEach(Runners.all, id: \.id) { Text($0.label).tag($0.id) }
+                    }
+                }
+                Picker("Agent", selection: $store.sessionAgent) {
+                    ForEach(AgentKind.all, id: \.id) { Text($0.label).tag($0.id) }
+                }
+                Text("Used for spaces that do not choose their own (Edit space) and by the agent queue. You can still pick another agent each time you start a session.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Agent queue") {
-                if !Orca.isInstalled {
-                    Text("Agent sessions need Orca, which was not found on this Mac.").foregroundStyle(.secondary)
+                if !Runners.anyAvailable {
+                    Text("Agent sessions need \(Runners.all.map(\.label).joined(separator: " or ")), which was not found on this Mac.").foregroundStyle(.secondary)
                 } else if store.queueColumn == nil {
                     LabeledContent("Queue column") {
                         Button("Add a “For agents” column") { store.addQueueColumn() }
                     }
-                    Text("A task dragged into that column is started as an agent session in Orca, without the Start session sheet, and then moves to In progress. Nothing starts by itself until the column exists.")
+                    Text("A task dragged into that column is started as an agent session in its space's runner, without the Start session sheet, and then moves to In progress. Nothing starts by itself until the column exists.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     Stepper("Sessions working at once: \(store.agentQueueLimit)",
                             value: $store.agentQueueLimit, in: 1...6)
                     Toggle("Run without asking for permission", isOn: $store.agentQueueSkipPermissions)
-                    Text("On: the agent is started with Claude Code's --dangerously-skip-permissions, so it edits files and runs commands in the checkout without stopping to ask. The first message contains ticket text written by other people. Off: it stops at the first permission prompt and waits for you in Orca.")
+                    Text("On: the agent is started with Claude Code's --dangerously-skip-permissions, so it edits files and runs commands in the checkout without stopping to ask. The first message contains ticket text written by other people. Off: it stops at the first permission prompt and waits for you in the runner.")
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle("Ask Claude which repository a ticket is about", isOn: $store.agentQueueAskClaude)
                     Text("The queue first looks for a repository's name in the ticket. On: when that finds none, the ticket's text is sent to the Claude API with the names of the space's repositories. Either way, when it stays unclear the card asks you to pick one. Needs the API key in the AI tab.")
@@ -316,14 +328,14 @@ private struct AgentSettings: View {
                 }
                 TextField("Claude home", text: $store.reviewHome, prompt: Text("~/.claude (default)"))
                 if !store.reviewHome.trimmingCharacters(in: .whitespaces).isEmpty,
-                   Orca.resolvedHome(store.reviewHome) == nil {
+                   Sessions.resolvedHome(store.reviewHome) == nil {
                     Text("That is not a directory on this Mac.").font(.caption).foregroundStyle(.orange)
                 }
                 Picker("Model", selection: $store.reviewModel) {
                     ForEach(ClaudeCode.models, id: \.id) { Text($0.label).tag($0.id) }
                 }
                 Toggle("Review when a session stops", isOn: $store.reviewWhenSessionStops)
-                Text("The review in the overview goes over every open task and its agent sessions and lists what needs you. It runs when you ask for it and when you open the overview, if the last review is more than ten minutes old; with the switch on, also when an agent stops, at most every ten minutes. Claude is asked again only when something changed. It changes nothing in Orca, the trackers or GitHub.")
+                Text("The review in the overview goes over every open task and its agent sessions and lists what needs you. It runs when you ask for it and when you open the overview, if the last review is more than ten minutes old; with the switch on, also when an agent stops, at most every ten minutes. Claude is asked again only when something changed. It changes nothing in the sessions, the trackers or GitHub.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("It uses the login of this one Claude home for every space, not the API key: the requests count against that login's usage limits, the same ones its sessions use. Each space sets how much of it is sent (Edit space, Review); a new space sends its status only. Lines that look like keys or passwords are left out of agent and terminal text, which lowers the risk of sending a secret but does not remove it.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -339,6 +351,8 @@ private struct AgentSettings: View {
         .onChange(of: store.codeReviewPrompt) { store.save() }
         .onChange(of: store.agentQueueSkipPermissions) { store.save() }
         .onChange(of: store.agentQueueAskClaude) { store.save() }
+        .onChange(of: store.sessionRunner) { store.save() }
+        .onChange(of: store.sessionAgent) { store.save() }
     }
 }
 

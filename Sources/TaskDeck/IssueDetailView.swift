@@ -158,13 +158,13 @@ struct IssueDetailView: View {
                 }
                 .disabled(explaining || detail == nil)
                 .help("Ask Claude to explain this ticket in simple words (ASD-STE100 style)")
-                if Orca.isInstalled {
+                if Runners.anyAvailable {
                     Button { showSession = true } label: {
                         Label("Start session", systemImage: "terminal")
                     }
                     // Wait for the ticket so the agent gets its full text, not only the title.
                     .disabled(loading)
-                    .help("Start an agent on this ticket in a new Orca worktree")
+                    .help("Start an agent on this ticket in a new \(store.runner(for: project).label) worktree")
                 }
                 Button { editing = task } label: { Label("Edit", systemImage: "pencil") }
                     .help("Change the task's title, space, ticket or time")
@@ -210,7 +210,7 @@ struct IssueDetailView: View {
         switch letter {
         case "e": editing = task
         case "s":
-            guard Orca.isInstalled, !loading else { return false }
+            guard Runners.anyAvailable, !loading else { return false }
             showSession = true
         case "l":
             guard isRedmine else { return false }
@@ -566,20 +566,20 @@ struct IssueDetailView: View {
         }
     }
 
-    /// One badge per agent session, newest first; a click opens it in Orca. The full rows are in
+    /// One badge per agent session, newest first; a click opens it in its runner. The full rows are in
     /// the Sessions tab.
     private func sessionPills(_ task: TaskItem) -> some View {
         HStack(spacing: 4) {
             ForEach(Array(store.sessions(of: task).reversed().prefix(3))) { session in
                 let link = store.status(of: session)?.badgeLink
                 Button {
-                    if let link { Browser.open(link, space: project) } else { Task { await Orca.reveal(session) } }
+                    if let link { Browser.open(link, space: project) } else { Task { await Runners.reveal(session) } }
                 } label: {
                     SessionBadge(status: store.status(of: session), count: 1)
                 }
                 .buttonStyle(.plain)
-                .help(link != nil ? "\(session.name) — open the pull request" : "\(session.name) — open in Orca")
-                .contextMenu { Button("Open Session in Orca") { Task { await Orca.reveal(session) } } }
+                .help(link != nil ? "\(session.name) — open the pull request" : "\(session.name) — open in \(Runners.label(of: session))")
+                .contextMenu { Button("Open Session in \(Runners.label(of: session))") { Task { await Runners.reveal(session) } } }
             }
             if sessionCount > 3 {
                 Button("+\(sessionCount - 3)") { tab = .sessions }

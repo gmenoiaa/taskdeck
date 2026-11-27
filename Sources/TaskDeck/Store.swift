@@ -23,13 +23,16 @@ final class AppStore {
     var codeReviewPrompt = ""
     var agentQueueSkipPermissions = true
     var agentQueueAskClaude = false
+    /// The runner and the agent a space's sessions use when the space does not choose its own.
+    var sessionRunner = Runners.defaultId
+    var sessionAgent = AgentKind.claude.id
     @ObservationIgnored var processingQueue = false
     /// Which notifications are sent.
     var notify = NotificationSettings() {
         didSet { Notifier.sound = notify.sound }
     }
     /// What each session was doing at the last look, to notice when it stops or its pull request closes.
-    @ObservationIgnored var sessionKinds: [String: Orca.Status.Kind] = [:]
+    @ObservationIgnored var sessionKinds: [String: SessionStatus.Kind] = [:]
     /// Tickets already seen as assigned to me; nil until the first look, which only takes note.
     @ObservationIgnored var knownAssigned: Set<String>?
     /// Waiting items the user cleared from the bell's list, by `WaitingItem.id`.
@@ -79,7 +82,7 @@ final class AppStore {
     /// Takes a dropped text when it is a pull request's link. Cards are dragged as text too, so
     /// the board's drop targets ask this first.
     func takeDrop(_ text: String) -> Bool {
-        guard Orca.isInstalled, CodeReview.pullRequest(text) != nil else { return false }
+        guard Runners.anyAvailable, CodeReview.pullRequest(text) != nil else { return false }
         openReview = text
         return true
     }
@@ -101,8 +104,10 @@ final class AppStore {
     @ObservationIgnored private var statusLoop: Task<Void, Never>?
     var refreshingStatuses = false
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
-    /// Live status of Orca worktrees by id; nil until Orca answered, or when it cannot be reached.
-    var sessionStatuses: [String: Orca.Status]?
+    /// Live status of the runners' worktrees by id; nil until a runner answered, or when none can be reached.
+    var sessionStatuses: [String: SessionStatus]?
+    /// The runners that answered at the last refresh. A session of one that did not has no status.
+    var answeredRunners: Set<String> = []
     /// Worktrees created in Orca that carry a task's ticket reference, by task id. Never saved: they
     /// are found again from Orca on every refresh.
     var linkedSessions: [UUID: [AgentSession]] = [:]
@@ -110,22 +115,22 @@ final class AppStore {
     var removingWorktrees: Set<String> = []
     /// Pull requests found by asking GitHub about a worktree's branch, by worktree id, for when
     /// Orca reports none.
-    @ObservationIgnored private var pullRequests: [String: [Orca.PullRequest]] = [:]
+    @ObservationIgnored private var pullRequests: [String: [GitHub.PullRequest]] = [:]
     /// What each stopped session's transcript ends on, by worktree id. Read again on every refresh.
     @ObservationIgnored private var transcripts: [String: SessionTranscript.Last] = [:]
     /// Title, description and dates of the tasks' pull requests, by their page, as read from
     /// GitHub since launch. The description is not saved, so a standup asks again for recent ones.
-    @ObservationIgnored private var pullRequestDetails: [URL: Orca.PullRequestDetail] = [:]
+    @ObservationIgnored private var pullRequestDetails: [URL: GitHub.PullRequestDetail] = [:]
     @ObservationIgnored private var pullRequestAsked: [String: Date] = [:]
     /// Reviews and comments on the tasks' pull requests, by the pull request's page.
-    @ObservationIgnored private var pullRequestFeedback: [URL: Orca.PullRequestFeedback] = [:]
+    @ObservationIgnored private var pullRequestFeedback: [URL: GitHub.PullRequestFeedback] = [:]
     /// When GitHub was last asked about each pull request, by `TaskPullRequest.id`, since launch.
     @ObservationIgnored private var pullRequestPolled: [String: Date] = [:]
     @ObservationIgnored private var pollingPullRequests = false
     /// The developer's own GitHub logins, read from gh at most every hour.
     @ObservationIgnored private var githubLogins: (logins: Set<String>, at: Date)?
-    @ObservationIgnored private var orcaRepos: [Orca.Repo] = []
-    @ObservationIgnored private var orcaReposAt = Date.distantPast
+    @ObservationIgnored private var knownRepos: [SessionRepo] = []
+    @ObservationIgnored private var knownReposAt = Date.distantPast
     @ObservationIgnored private var sessionLoop: Task<Void, Never>?
     @ObservationIgnored private var refreshingSessions = false
 
@@ -165,6 +170,8 @@ final class AppStore {
         var reviewDismissed: [String: String]?
         var overviewLayout: [OverviewSlot]?
         var codeReviewPrompt: String?
+        var sessionRunner: String?
+        var sessionAgent: String?
     }
 
     static var dataURL: URL {
@@ -185,7 +192,7 @@ final class AppStore {
         Notifier.onSession = { [weak self] worktree in
             guard let self, let session = self.tasks.lazy.flatMap(self.sessions(of:)).first(where: { $0.worktreeId == worktree })
             else { return }
-            Task { await Orca.reveal(session) }
+            Task { await Runners.reveal(session) }
         }
         Notifier.onReminder = { [weak self] task, id, snooze in self?.answerReminder(task: task, id: id, snooze: snooze) }
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
@@ -400,6 +407,8 @@ final class AppStore {
             reviewDismissed = snap.reviewDismissed ?? [:]
             overviewLayout = snap.overviewLayout ?? []
             codeReviewPrompt = snap.codeReviewPrompt ?? ""
+            sessionRunner = snap.sessionRunner ?? Runners.defaultId
+            sessionAgent = snap.sessionAgent ?? AgentKind.claude.id
         } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -430,7 +439,8 @@ final class AppStore {
                             reviewModel: reviewModel, reviewWhenSessionStops: reviewWhenSessionStops,
                             reviewDismissed: reviewDismissed.isEmpty ? nil : reviewDismissed,
                             overviewLayout: overviewLayout.isEmpty ? nil : overviewLayout,
-                            codeReviewPrompt: codeReviewPrompt.isEmpty ? nil : codeReviewPrompt)
+                            codeReviewPrompt: codeReviewPrompt.isEmpty ? nil : codeReviewPrompt,
+                            sessionRunner: sessionRunner, sessionAgent: sessionAgent)
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
@@ -862,9 +872,12 @@ final class AppStore {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].sessions = (tasks[i].sessions ?? []) + [session]
         if remember, let p = projects.firstIndex(where: { $0.id == tasks[i].projectId }) {
-            projects[p].orcaRepoId = repoId
-            // A repository used for a space's task belongs to that space from then on.
-            if !projects[p].repoIds.contains(repoId) { projects[p].orcaRepoIds = projects[p].repoIds + [repoId] }
+            // The space keeps repository ids for Orca only; another runner's mean nothing there.
+            if session.runnerId == OrcaRunner.id {
+                projects[p].orcaRepoId = repoId
+                // A repository used for a space's task belongs to that space from then on.
+                if !projects[p].repoIds.contains(repoId) { projects[p].orcaRepoIds = projects[p].repoIds + [repoId] }
+            }
             projects[p].githubAccount = githubAccount.isEmpty ? nil : githubAccount
             if let claudeHome { projects[p].claudeHome = claudeHome.isEmpty ? nil : claudeHome }
         }
@@ -883,12 +896,13 @@ final class AppStore {
     }
 
     private func refreshSessions(force: Bool) async {
-        guard Orca.isInstalled else { return }
+        let runners = Runners.all.filter(\.isAvailable)
+        guard !runners.isEmpty else { return }
         if force {
             // A background refresh may be half-way; let it finish (a few seconds at most) and then run this one.
             for _ in 0..<50 where refreshingSessions { try? await Task.sleep(for: .milliseconds(100)) }
             pullRequestAsked.removeAll()
-            orcaReposAt = .distantPast
+            knownReposAt = .distantPast
         }
         guard !refreshingSessions else { return }
         let spaces = projects.filter { !$0.repoIds.isEmpty || !($0.githubOrg ?? "").isEmpty }
@@ -896,15 +910,28 @@ final class AppStore {
                 || tasks.contains(where: { !$0.archived && !($0.sessions ?? []).isEmpty }) else { return }
         refreshingSessions = true
         defer { refreshingSessions = false }
-        guard let trees = try? await Orca.worktrees() else {
-            // Orca closed or not answering: show no status rather than a stale one.
+        var trees: [SessionWorktree] = []
+        var answered: Set<String> = []
+        for runner in runners {
+            guard let list = try? await runner.worktrees() else { continue }
+            trees += list
+            answered.insert(runner.id)
+        }
+        if answeredRunners != answered { answeredRunners = answered }
+        guard !answered.isEmpty else {
+            // No runner answering (closed, not installed): show no status rather than a stale one.
             if sessionStatuses != nil { sessionStatuses = nil }
             return
         }
         // Repositories change rarely; they are needed for organisations and for asking GitHub.
-        if Date().timeIntervalSince(orcaReposAt) > 300, let repos = try? await Orca.repos() {
-            orcaRepos = repos
-            orcaReposAt = Date()
+        if Date().timeIntervalSince(knownReposAt) > 300 {
+            var repos: [SessionRepo] = []
+            for runner in runners where answered.contains(runner.id) {
+                // One that fails keeps what it listed last time.
+                if let list = try? await runner.repos() { repos += list } else { repos += knownRepos.filter { $0.runner == runner.id } }
+            }
+            knownRepos = repos
+            knownReposAt = Date()
         }
         link(trees, spaces: spaces)
         await readTranscripts(trees)
@@ -915,10 +942,10 @@ final class AppStore {
 
     /// Adds the pull requests Orca and the branch lookups report to their tasks' lists. Nothing is
     /// taken off here: a pull request stays after its branch gets another one or its worktree goes.
-    private func recordPullRequests(_ trees: [Orca.Worktree]) {
+    private func recordPullRequests(_ trees: [SessionWorktree]) {
         guard let statuses = sessionStatuses else { return }
         let byId = Dictionary(trees.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let slugs = Dictionary(orcaRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
+        let slugs = Dictionary(knownRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
                                uniquingKeysWith: { first, _ in first })
         var changed = false
         for i in tasks.indices where !tasks[i].archived {
@@ -1012,19 +1039,19 @@ final class AppStore {
         pollingPullRequests = true
         defer { pollingPullRequests = false }
         if Date().timeIntervalSince(githubLogins?.at ?? .distantPast) > 3600 {
-            githubLogins = (await Orca.githubLogins(), Date())
+            githubLogins = (await GitHub.logins(), Date())
         }
         let mine = githubLogins?.logins ?? []
         for item in due { pullRequestPolled[item.id] = Date() }
         var changed = false
-        await withTaskGroup(of: (String, Orca.PullRequestReport?).self) { group in
+        await withTaskGroup(of: (String, GitHub.PullRequestReport?).self) { group in
             var next = 0
             func add() {
                 guard next < due.count else { return }
                 let item = due[next]
                 next += 1
                 group.addTask {
-                    (item.id, await Orca.pullRequestReport(slug: item.slug, number: item.number, account: item.account, mine: mine))
+                    (item.id, await GitHub.pullRequestReport(slug: item.slug, number: item.number, account: item.account, mine: mine))
                 }
             }
             for _ in 0..<Self.spaceRefreshWidth { add() }
@@ -1039,7 +1066,7 @@ final class AppStore {
 
     /// Keeps GitHub's answer on every task that lists the pull request, and announces what is new
     /// in it once. Returns whether any task lists it.
-    private func received(_ report: Orca.PullRequestReport, for id: String) -> Bool {
+    private func received(_ report: GitHub.PullRequestReport, for id: String) -> Bool {
         var said = false
         for i in tasks.indices {
             guard let j = tasks[i].pullRequests?.firstIndex(where: { $0.id == id }),
@@ -1099,31 +1126,34 @@ final class AppStore {
     }
 
     /// Reviews and comments on a session's open pull request, as last read from GitHub.
-    func feedback(of session: AgentSession) -> Orca.PullRequestFeedback? {
+    func feedback(of session: AgentSession) -> GitHub.PullRequestFeedback? {
         status(of: session)?.prURL.flatMap { pullRequestFeedback[$0] }
     }
 
     /// Matches worktrees created in Orca to tasks: same space, and the ticket reference in the name or branch.
-    private func link(_ trees: [Orca.Worktree], spaces: [Project]) {
+    private func link(_ trees: [SessionWorktree], spaces: [Project]) {
         let saved = Set(tasks.flatMap { $0.sessions ?? [] }.compactMap(\.worktreeId))
         let known = Dictionary(linkedSessions.values.flatMap { $0 }.compactMap { s in s.worktreeId.map { ($0, s.id) } },
                                uniquingKeysWith: { first, _ in first })
         var fresh: [UUID: [AgentSession]] = [:]
         for space in spaces {
-            let repoIds = Set(space.repoIds).union(orcaRepos.filter(space.owns).map(\.id))
+            let owned = Set(knownRepos.filter(space.owns).map { "\($0.runner) \($0.id)" })
             // The main checkout is the repository itself, not work on one ticket.
-            let candidates = trees.filter { repoIds.contains($0.repoId) && !$0.isMain && !saved.contains($0.id) }
+            let candidates = trees.filter { tree in
+                (space.repoIds(on: tree.runner).contains(tree.repoId) || owned.contains("\(tree.runner) \(tree.repoId)"))
+                    && !tree.isMain && !saved.contains(tree.id)
+            }
             guard !candidates.isEmpty else { continue }
             // Archived tasks too: their worktrees are the ones left to clean up.
             for task in tasks where task.projectId == space.id && !task.ref.isEmpty {
                 let found = candidates
-                    .filter { Orca.mentions(task.ref, in: $0.name) || Orca.mentions(task.ref, in: $0.branch) }
+                    .filter { Sessions.mentions(task.ref, in: $0.name) || Sessions.mentions(task.ref, in: $0.branch) }
                     .sorted { ($0.createdAt ?? .distantPast) < ($1.createdAt ?? .distantPast) }
                     .map { tree in
                         // The same id as last time, so the views do not rebuild their rows every refresh.
                         AgentSession(id: known[tree.id] ?? UUID(), worktreeId: tree.id, path: tree.path,
                                      name: tree.name, repoName: tree.repoName, agent: "",
-                                     startedAt: tree.createdAt ?? .distantPast)
+                                     startedAt: tree.createdAt ?? .distantPast, runner: tree.runner)
                     }
                 if !found.isEmpty { fresh[task.id] = found }
             }
@@ -1135,7 +1165,7 @@ final class AppStore {
     /// that stopped: Orca knows the answer only of agents its own launcher started. Read even
     /// when Orca has the answer: only the transcript says what the agent is waiting for, a
     /// question or something it left running. A file that has not changed is not read again.
-    private func readTranscripts(_ trees: [Orca.Worktree]) async {
+    private func readTranscripts(_ trees: [SessionWorktree]) async {
         let sessions = tasks.filter { !$0.archived }.flatMap(sessions(of:))
         let mine = Set(sessions.compactMap(\.worktreeId))
         let homes = SessionTranscript.homes(Array(Set(sessions.compactMap(\.claudeHome))).sorted())
@@ -1147,9 +1177,9 @@ final class AppStore {
     }
 
     /// Turns Orca's answer into the statuses the views read, with GitHub's pull request where Orca has none.
-    private func publish(_ trees: [Orca.Worktree]) {
-        var fresh: [String: Orca.Status] = [:]
-        let slugs = Dictionary(orcaRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
+    private func publish(_ trees: [SessionWorktree]) {
+        var fresh: [String: SessionStatus] = [:]
+        let slugs = Dictionary(knownRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
                                uniquingKeysWith: { first, _ in first })
         for tree in trees {
             var status = tree.status
@@ -1160,7 +1190,7 @@ final class AppStore {
                 if status.kind == .yourTurn { status.ask = last.ask }
                 status.running = last.running
             }
-            if status.prNumber == nil, let pr = Orca.current(pullRequests[tree.id] ?? []) {
+            if status.prNumber == nil, let pr = GitHub.current(pullRequests[tree.id] ?? []) {
                 status.prNumber = pr.number
                 status.prDraft = pr.draft && pr.state == "open"
                 if status.kind == .idle {
@@ -1178,18 +1208,18 @@ final class AppStore {
     /// Asks GitHub for the pull requests of the sessions' branches, as the space's GitHub account:
     /// Orca reports one per worktree at most, and for some none. A few per background refresh;
     /// each at most every five minutes while it has none or an open one, otherwise every hour. Returns whether anything changed.
-    private func askGitHub(_ trees: [Orca.Worktree], limit: Int) async -> Bool {
+    private func askGitHub(_ trees: [SessionWorktree], limit: Int) async -> Bool {
         let byId = Dictionary(trees.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let slugs = Dictionary(orcaRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
+        let slugs = Dictionary(knownRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
                                uniquingKeysWith: { first, _ in first })
-        var due: [(tree: Orca.Worktree, slug: String, account: String?)] = []
+        var due: [(tree: SessionWorktree, slug: String, account: String?)] = []
         for task in tasks where !task.archived {
             for session in sessions(of: task) {
                 guard let id = session.worktreeId, let tree = byId[id], !tree.branch.isEmpty,
                       tree.status.kind != .working, let slug = slugs[tree.repoId] else { continue }
                 // Where Orca reports one, or the one found has ended, the answer is only wanted
                 // for the task's list: the branch's earlier pull requests, or a new one after a merge.
-                let ended = Orca.current(pullRequests[id] ?? []).map { $0.state != "open" } ?? false
+                let ended = GitHub.current(pullRequests[id] ?? []).map { $0.state != "open" } ?? false
                 let rarely = ended || tree.status.prNumber != nil
                 if let asked = pullRequestAsked[id], Date().timeIntervalSince(asked) < (rarely ? 3600 : 300) { continue }
                 if due.contains(where: { $0.tree.id == id }) { continue }
@@ -1200,7 +1230,7 @@ final class AppStore {
         for item in due.prefix(limit) {
             pullRequestAsked[item.tree.id] = Date()
             // A failed question keeps what was known; only a real answer replaces it.
-            guard let answer = await Orca.pullRequests(slug: item.slug, branch: item.tree.branch, account: item.account) else { continue }
+            guard let answer = await GitHub.pullRequests(slug: item.slug, branch: item.tree.branch, account: item.account) else { continue }
             if pullRequests[item.tree.id] ?? [] != answer || pullRequests[item.tree.id] == nil {
                 pullRequests[item.tree.id] = answer
                 changed = true
@@ -1214,9 +1244,22 @@ final class AppStore {
         (task.sessions ?? []) + (linkedSessions[task.id] ?? [])
     }
 
-    /// The live status of a session; nil when Orca did not answer or the session has no worktree id.
-    func status(of session: AgentSession) -> Orca.Status? {
-        guard let all = sessionStatuses, let id = session.worktreeId else { return nil }
+    /// The runner a space's new sessions start in: the space's own choice, else the app's.
+    func runner(for project: Project?) -> any SessionRunner {
+        Runners.resolve(project?.sessionRunner ?? sessionRunner)
+    }
+
+    /// The agent a space's new sessions start with, among those the runner can start: the space's
+    /// own choice, else the app's, else the runner's first.
+    func agent(for project: Project?, runner: any SessionRunner) -> AgentKind {
+        let wanted = project?.sessionAgent ?? sessionAgent
+        return runner.agents.first { $0.id == wanted } ?? runner.agents.first ?? .claude
+    }
+
+    /// The live status of a session; nil when its runner did not answer or the session has no worktree id.
+    func status(of session: AgentSession) -> SessionStatus? {
+        guard let all = sessionStatuses, let id = session.worktreeId,
+              answeredRunners.contains(session.runnerId) else { return nil }
         return all[id] ?? .gone
     }
 
@@ -1233,7 +1276,8 @@ final class AppStore {
     /// and no agent is working in it.
     func removableSessions(of task: TaskItem) -> [AgentSession] {
         sessions(of: task).filter { session in
-            guard let id = session.worktreeId, Orca.canRemove(worktreeId: id),
+            guard let id = session.worktreeId, let runner = Runners.of(session),
+                  runner.capabilities.contains(.removeWorktree), runner.canRemove(worktreeId: id),
                   let kind = status(of: session)?.kind else { return false }
             return kind != .gone && kind != .working
         }
@@ -1261,7 +1305,8 @@ final class AppStore {
             removingWorktrees.insert(id)
             defer { removingWorktrees.remove(id) }
             do {
-                try await Orca.removeWorktree(id: id, force: force)
+                guard let runner = Runners.of(item.session) else { continue }
+                try await runner.removeWorktree(id: id, force: force)
                 if let i = tasks.firstIndex(where: { $0.id == item.taskId }) {
                     tasks[i].sessions?.removeAll { $0.worktreeId == id }
                 }
@@ -1276,7 +1321,7 @@ final class AppStore {
         return failures
     }
 
-    /// Forgets a session here. The worktree and its branch stay in Orca.
+    /// Forgets a session here. The worktree and its branch stay in the runner.
     func removeSession(_ sessionId: UUID, from id: UUID) {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].sessions?.removeAll { $0.id == sessionId }
@@ -1386,13 +1431,13 @@ final class AppStore {
     }
 
     /// The pull request of an agent session, as last read from GitHub.
-    func pullRequest(of session: AgentSession) -> Orca.PullRequestDetail? {
+    func pullRequest(of session: AgentSession) -> GitHub.PullRequestDetail? {
         guard let page = status(of: session)?.prURL else { return nil }
         if let read = pullRequestDetails[page] { return read }
         // Not read since launch: what was saved says the same, less the description.
         guard let saved = tasks.lazy.compactMap({ $0.pullRequests?.first { $0.url == page && $0.checkedAt != nil } }).first,
               let state = saved.state else { return nil }
-        return Orca.PullRequestDetail(number: saved.number, title: saved.title ?? "", body: "", state: state,
+        return GitHub.PullRequestDetail(number: saved.number, title: saved.title ?? "", body: "", state: state,
                                       draft: saved.draft ?? false, createdAt: saved.createdAt,
                                       mergedAt: saved.mergedAt, closedAt: saved.closedAt)
     }
