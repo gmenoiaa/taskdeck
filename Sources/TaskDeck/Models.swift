@@ -52,7 +52,7 @@ enum ColumnRole: String, Codable, CaseIterable, Identifiable {
     var hint: String {
         switch self {
         case .backlog: return "Starting a timer moves the task to the In progress column."
-        case .agents: return "A task dragged here is started as an agent session in Orca, a few at a time, and then moves to In progress."
+        case .agents: return "A task dragged here is started as an agent session, a few at a time, and then moves to In progress."
         case .inProgress: return "Where tasks go when you start a timer on a not-started or done task."
         case .normal: return "A normal work step, such as review or testing."
         case .watching: return "Tasks you only follow. Not suggested in the menu bar; timers leave them here."
@@ -103,7 +103,7 @@ struct Project: Identifiable, Codable, Hashable {
     /// Empty or nil means Claude's own default.
     var claudeHome: String?
     /// The first message for this space's agent sessions, with placeholders such as "{ref}" (see
-    /// `Orca.placeholders`). Empty or nil means the app's standard message.
+    /// `Sessions.placeholders`). Empty or nil means the app's standard message.
     var sessionPrompt: String?
     /// The first message for a code review session started in this space (see
     /// `CodeReview.placeholders`). Empty or nil means the app's own, from Settings.
@@ -126,16 +126,26 @@ struct Project: Identifiable, Codable, Hashable {
     var dailyTargetHours: Double?
     /// How much of this space the review may send to Claude: a `ReviewDetail`. Nil is status only.
     var reviewDetail: String?
+    /// The `SessionRunner.id` this space's sessions start in; nil follows the app's default.
+    var sessionRunner: String?
+    /// The `AgentKind.id` preselected for this space's sessions and used by the agent queue; nil
+    /// follows the app's default.
+    var sessionAgent: String?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }
     var keychainAccount: String { "apikey-\(id.uuidString)" }
+    /// The Orca repositories ticked for this space. Each runner has ids of its own, so these mean
+    /// nothing to another one; `repoIds(on:)` asks for a runner's.
     var repoIds: [String] { orcaRepoIds ?? [orcaRepoId].compactMap { $0 } }
 
-    /// The space's repositories among those Orca has: the ticked ones plus every repository of its
-    /// GitHub organisation, so one added to Orca later belongs to the space without another step.
-    func owns(_ repo: Orca.Repo) -> Bool {
-        if repoIds.contains(repo.id) { return true }
+    /// The repositories ticked for this space in the given runner.
+    func repoIds(on runner: String) -> [String] { runner == OrcaRunner.id ? repoIds : [] }
+
+    /// The space's repositories among those a runner has: the ticked ones plus every repository of
+    /// its GitHub organisation, so one added later belongs to the space without another step.
+    func owns(_ repo: SessionRepo) -> Bool {
+        if repoIds(on: repo.runner).contains(repo.id) { return true }
         guard let org = githubOrg, !org.isEmpty, let owner = repo.owner else { return false }
         return owner.caseInsensitiveCompare(org) == .orderedSame
     }

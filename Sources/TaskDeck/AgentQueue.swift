@@ -60,18 +60,27 @@ extension AppStore {
 
     /// Starts waiting tasks while there are free slots.
     func runAgentQueue() async {
-        // Without Orca's answer the number of working sessions is unknown, so nothing is started.
-        guard Orca.isInstalled, !processingQueue, let column = queueColumn, sessionStatuses != nil else { return }
+        // Without a runner's answer the number of working sessions is unknown, so nothing is started.
+        guard Runners.anyAvailable, !processingQueue, let column = queueColumn, sessionStatuses != nil else { return }
         var free = agentQueueLimit - queueBusy
         guard free > 0, !queueWaiting.isEmpty else { return }
         processingQueue = true
         defer { processingQueue = false }
-        guard let repos = try? await Orca.repos() else { return }
+        // Each space may use another runner; each one's repositories are asked for once per round.
+        var reposByRunner: [String: [SessionRepo]] = [:]
 
         for waiting in queueWaiting where free > 0 {
             // Everything below awaits; the task may have been moved or deleted meanwhile.
             guard let task = task(waiting.id), task.status == column.id, task.queueNote == nil else { continue }
             let project = project(task.projectId)
+            let runner = runner(for: project)
+            // A runner that did not answer is asked again next round; the task keeps its place.
+            guard runner.isAvailable, answeredRunners.contains(runner.id) else { continue }
+            if reposByRunner[runner.id] == nil {
+                guard let listed = try? await runner.repos() else { continue }
+                reposByRunner[runner.id] = listed
+            }
+            let repos = reposByRunner[runner.id] ?? []
 
             var detail: TicketDetail?
             if let project, TicketFetcher.canFetch(project: project, task: task) {
@@ -86,7 +95,7 @@ extension AppStore {
 
             let owned = project.map { p in repos.filter(p.owns) } ?? []
             var repo = repos.first { $0.id == task.queueRepoId }
-            if repo == nil { repo = Orca.inferRepository(task: task, detail: detail, among: owned) }
+            if repo == nil { repo = Sessions.inferRepository(task: task, detail: detail, among: owned) }
             if repo == nil, agentQueueAskClaude, let detail, owned.count > 1 {
                 repo = await askClaudeForRepository(task: task, project: project, detail: detail, among: owned)
             }
@@ -102,19 +111,19 @@ extension AppStore {
 
             // Moved away while the ticket was being read: the user changed their mind.
             guard self.task(task.id)?.status == column.id else { continue }
-            let name = Orca.worktreeName(ref: task.ref, title: detail?.subject ?? task.title)
+            let name = Sessions.worktreeName(ref: task.ref, title: detail?.subject ?? task.title)
             let comment = [task.displayRef, task.title].filter { !$0.isEmpty }.joined(separator: " ")
             do {
-                var session = try await Orca.start(
-                    repo: repo, name: name, agent: "claude",
-                    prompt: Orca.prompt(task: task, project: project, detail: detail), comment: comment,
-                    claudeHome: project?.claudeHome, githubAccount: project?.githubAccount,
-                    skipPermissions: agentQueueSkipPermissions)
+                var session = try await runner.start(SessionLaunch(
+                    repo: repo, name: name, agent: agent(for: project, runner: runner),
+                    prompt: Sessions.prompt(task: task, project: project, detail: detail), comment: comment,
+                    home: project?.claudeHome ?? "", githubAccount: project?.githubAccount ?? "",
+                    unattended: agentQueueSkipPermissions))
                 session.queued = true
                 started(session, for: task.id)
                 free -= 1
             } catch {
-                setQueueNote("Orca could not start the session: \(error.localizedDescription)", for: task.id)
+                setQueueNote("\(runner.label) could not start the session: \(error.localizedDescription)", for: task.id)
             }
         }
         await refreshSessionStatuses()
@@ -148,7 +157,7 @@ extension AppStore {
     /// One short question to Claude, only when the user turned it on: which of the space's
     /// repositories the ticket is about. Private notes are not part of the ticket text.
     private func askClaudeForRepository(task: TaskItem, project: Project?, detail: TicketDetail,
-                                        among repos: [Orca.Repo]) async -> Orca.Repo? {
+                                        among repos: [SessionRepo]) async -> SessionRepo? {
         guard let key = Claude.apiKey() else { return nil }
         let system = """
             You match a ticket to the code repository it is about. Reply with exactly one repository \

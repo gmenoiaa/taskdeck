@@ -150,7 +150,7 @@ struct ReviewFacts {
 
     /// `trees` is Orca's answer by worktree id; `screens` holds the terminal text already read for
     /// sessions of spaces at the full level.
-    init(store: AppStore, trees: [String: Orca.Worktree], screens: [String: String], now: Date = Date()) {
+    init(store: AppStore, trees: [String: SessionWorktree], screens: [String: String], now: Date = Date()) {
         var found: [(task: TaskItem, findings: [Finding], lines: [String], held: Finding?, key: String?, judged: Bool)] = []
         // The user's own name in each tracker, to tell their comments from other people's: the
         // assignee of the tickets the tracker lists as assigned to them. Nothing is asked for it.
@@ -285,7 +285,7 @@ struct ReviewFacts {
                 findings.append(Finding(urgency: 3, text: "The agent stopped and there is no pull request.", action: "open_session"))
             }
             if !statuses.isEmpty, statuses.allSatisfy({ $0.1.kind == .gone }), role == .inProgress {
-                findings.append(Finding(urgency: 3, text: "Its worktree is no longer in Orca.", action: "none"))
+                findings.append(Finding(urgency: 3, text: "Its worktree no longer exists.", action: "none"))
             }
             if let due = task.due {
                 let left = Due.daysLeft(due, now: now)
@@ -596,9 +596,10 @@ extension AppStore {
         reviewRanAt = Date()
         await refreshSessionStatuses(force: !automatic)
 
-        var trees: [String: Orca.Worktree] = [:]
-        if Orca.isInstalled, let list = try? await Orca.worktrees() {
-            trees = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var trees: [String: SessionWorktree] = [:]
+        for runner in Runners.all where runner.isAvailable {
+            guard let list = try? await runner.worktrees() else { continue }
+            trees.merge(list.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         }
         // The terminal is read only for spaces that allow it, and not while the agent is working:
         // the screen then changes by the second and says little.
@@ -607,7 +608,8 @@ extension AppStore {
             for session in sessions(of: task) {
                 guard screens.count < 15, let id = session.worktreeId, screens[id] == nil, let tree = trees[id],
                       tree.status.kind != .working else { continue }
-                screens[id] = await Orca.screen(of: tree, savedHandle: session.terminalHandle)
+                guard let runner = Runners.find(tree.runner), runner.capabilities.contains(.screen) else { continue }
+                screens[id] = await runner.screen(of: tree, savedHandle: session.terminalHandle)
             }
         }
 

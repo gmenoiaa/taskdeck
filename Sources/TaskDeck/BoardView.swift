@@ -54,7 +54,7 @@ struct BoardView: View {
     }
 
 private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
-        func session(_ kind: Orca.Status.Kind) -> Bool {
+        func session(_ kind: SessionStatus.Kind) -> Bool {
             store.sessions(of: task).contains { store.status(of: $0)?.kind == kind }
         }
         switch filter {
@@ -159,7 +159,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
     private func open(_ item: AppStore.WaitingItem) {
         if item.kind == .assigned { showImport = true; return }
         if let session = item.session, item.kind == .yourTurn {
-            Task { await Orca.reveal(session) }
+            Task { await Runners.reveal(session) }
             return
         }
         if item.kind == .pullRequest, let link = item.link {
@@ -280,7 +280,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
                 guard store.project(task.projectId)?.kind == .redmine else { return false }
                 logging = task
             case "s":
-                guard Orca.isInstalled else { return false }
+                guard Runners.anyAvailable else { return false }
                 startingSession = task
             case "c":
                 guard !task.url.isEmpty else { return false }
@@ -298,7 +298,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
     }
 
     private func paste(_ link: String) -> Bool {
-        if Orca.isInstalled, CodeReview.pullRequest(link) != nil {
+        if Runners.anyAvailable, CodeReview.pullRequest(link) != nil {
             reviewPullRequest(link)
             return true
         }
@@ -456,7 +456,7 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
     private var newTaskMenu: some View {
         Button("New Task") { newTask() }
         Button("Review a Pull Request…") { reviewPullRequest() }
-            .disabled(!Orca.isInstalled)
+            .disabled(!Runners.anyAvailable)
     }
 
         var body: some View {
@@ -677,10 +677,10 @@ private func fits(_ task: TaskItem, _ filter: BoardFilter) -> Bool {
 }
 
 /// A session's badges: its pull request, when it has one, and the session itself. Two badges so
-/// both stay one click away: the pull request opens on GitHub, the session in Orca.
+/// both stay one click away: the pull request opens on GitHub, the session in its runner.
 struct SessionBadges: View {
     let session: AgentSession
-    let status: Orca.Status?
+    let status: SessionStatus?
     let space: Project?
     let count: Int
     /// The task's newest pull request, where the badges stand for the whole task (a card): shown
@@ -710,13 +710,13 @@ struct SessionBadges: View {
             .buttonStyle(.plain)
             .help("\(status.isAboutPullRequest ? status.detail : "A pull request is open for this worktree.") Click to open it.")
         }
-        Button { Task { await Orca.reveal(session) } } label: {
+        Button { Task { await Runners.reveal(session) } } label: {
             SessionBadge(status: status, count: count, compact: compact, agentOnly: pullRequest != nil || status?.prURL != nil)
                 .fixedSize()
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help("Agent session “\(session.name)” in \(session.repoName). \(status?.isAboutPullRequest == true ? "" : status?.detail ?? "") Click to open it in Orca.")
+        .help("Agent session “\(session.name)” in \(session.repoName). \(status?.isAboutPullRequest == true ? "" : status?.detail ?? "") Click to open it in \(Runners.label(of: session)).")
     }
 }
 
@@ -955,7 +955,7 @@ struct AppCommands: Commands {
                 .disabled(board == nil)
             Button("Review a Pull Request…") { board?.reviewPullRequest() }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
-                .disabled(board == nil || !Orca.isInstalled)
+                .disabled(board == nil || !Runners.anyAvailable)
             Button("Log Pending Time…") { board?.logPending?() }
                 .keyboardShortcut("l", modifiers: .command)
                 .disabled(board?.logPending == nil)
@@ -1075,7 +1075,7 @@ private struct QueueRepositoryPicker: View {
     @Environment(AppStore.self) private var store
     let task: TaskItem
     let done: () -> Void
-    @State private var repos: [Orca.Repo] = []
+    @State private var repos: [SessionRepo] = []
     @State private var failure: String?
     @State private var loaded = false
 
@@ -1111,12 +1111,13 @@ private struct QueueRepositoryPicker: View {
         .padding(14)
         .frame(width: 300)
         .task {
-            do { repos = try await Orca.repos() } catch { failure = error.localizedDescription }
+            // The runner the queue will start the session in, so the id means something to it.
+            do { repos = try await store.runner(for: store.project(task.projectId)).repos() } catch { failure = error.localizedDescription }
             loaded = true
         }
     }
 
-    private func row(_ repo: Orca.Repo) -> some View {
+    private func row(_ repo: SessionRepo) -> some View {
         Button {
             store.setQueueRepository(repo.id, for: task.id)
             done()
@@ -1557,8 +1558,8 @@ struct TaskCard: View {
             }
             Divider()
             Button("Start agent session…") { startingSession = true }
-            if let session = store.headlineSession(of: task) {
-                Button("Open session in Orca") { Task { await Orca.reveal(session) } }
+            if let session = store.headlineSession(of: task), Runners.of(session)?.capabilities.contains(.reveal) == true {
+                Button("Open session in \(Runners.label(of: session))") { Task { await Runners.reveal(session) } }
             }
             if let pr = store.latestPullRequest(of: task)?.url
                 ?? store.sessions(of: task).compactMap({ store.status(of: $0)?.prURL }).last {
@@ -1566,7 +1567,9 @@ struct TaskCard: View {
             }
             let removable = store.removableSessions(of: task)
             if !removable.isEmpty {
-                Button(removable.count == 1 ? "Remove Worktree in Orca…" : "Remove \(removable.count) Worktrees in Orca…") {
+                let runners = Set(removable.map(Runners.label(of:)))
+                let place = runners.count == 1 ? " in \(runners.first ?? "")" : ""
+                Button(removable.count == 1 ? "Remove Worktree\(place)…" : "Remove \(removable.count) Worktrees\(place)…") {
                     removingWorktrees = removable.map { TaskWorktree(taskId: task.id, session: $0) }
                 }
             }

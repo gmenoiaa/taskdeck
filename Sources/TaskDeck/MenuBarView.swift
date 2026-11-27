@@ -102,7 +102,7 @@ struct MenuBarView: View {
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 // The sheet belongs to the main window, so this asks the window for it, like a standup.
-                if Orca.isInstalled {
+                if Runners.anyAvailable {
                     Button("Review PR…") {
                         store.openReview = ""
                         openWindow(id: "main")

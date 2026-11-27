@@ -21,7 +21,7 @@ enum CodeReview {
               host == "github.com" || host == "www.github.com" else { return nil }
         let path = parts.path.split(separator: "/").map(String.init)
         guard path.count >= 4, path[2] == "pull", let number = Int(path[3]), number > 0,
-              let slug = Orca.githubSlug("\(path[0])/\(path[1])") else { return nil }
+              let slug = GitHub.slug("\(path[0])/\(path[1])") else { return nil }
         return PullRequest(slug: slug, number: number)
     }
 
@@ -92,12 +92,14 @@ struct CodeReviewView: View {
     }
 
     @State private var link = ""
-    @State private var repos: [Orca.Repo] = []
+    @State private var repos: [SessionRepo] = []
     @State private var spaceId: UUID?
     @State private var title = ""
-    /// Where the repository is cloned when Orca does not have it, as typed.
+    /// Where the repository is cloned when the runner does not have it, as typed.
     @State private var parent = "~"
-    @State private var agent = Orca.agents[0].id
+    /// The `SessionRunner.id` of the chosen space, or the app's default without one.
+    @State private var runnerId = ""
+    @State private var agent = ""
     @State private var name = ""
     @State private var claudeHome = ""
     @State private var githubAccount = ""
@@ -114,18 +116,20 @@ struct CodeReviewView: View {
 
     private var pullRequest: CodeReview.PullRequest? { CodeReview.pullRequest(link) }
     private var project: Project? { store.project(spaceId) }
-    private var repo: Orca.Repo? {
+    private var runner: any SessionRunner { Runners.resolve(runnerId.isEmpty ? nil : runnerId) }
+    private var agentKind: AgentKind { AgentKind.find(agent) ?? runner.agents.first ?? .claude }
+    private var repo: SessionRepo? {
         guard let pullRequest else { return nil }
         return repos.first { $0.slug?.caseInsensitiveCompare(pullRequest.slug) == .orderedSame }
     }
     private var homeTyped: String { claudeHome.trimmingCharacters(in: .whitespaces) }
     private var homeMissing: Bool {
-        agent == "claude" && !homeTyped.isEmpty && Orca.resolvedHome(homeTyped) == nil
+        agentKind.homeVariable != nil && !homeTyped.isEmpty && Sessions.resolvedHome(homeTyped) == nil
     }
     /// Where the clone would go, or why it cannot. Nil when nothing has to be cloned.
     private var destination: Result<String, Error>? {
         guard !loading, let pullRequest, repo == nil else { return nil }
-        return Result { try Orca.newDirectoryPath(named: pullRequest.repoName, in: parent) }
+        return Result { try Sessions.newDirectoryPath(named: pullRequest.repoName, in: parent) }
     }
     private var canStart: Bool {
         guard !starting, !loading, pullRequest != nil, !homeMissing else { return false }
@@ -138,7 +142,7 @@ struct CodeReviewView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Review a pull request").font(.title3.weight(.semibold))
-                Text(title.isEmpty ? "A session in Orca that reviews somebody else's pull request." : title)
+                Text(title.isEmpty ? "An agent session that reviews somebody else's pull request." : title)
                     .foregroundStyle(.secondary).lineLimit(2)
             }
             .padding(14)
@@ -161,7 +165,7 @@ struct CodeReviewView: View {
                         }
                         switch destination {
                         case .success(let path):
-                            Text("Orca does not have \(pullRequest.slug) yet. It is cloned to \(path) and added to Orca.")
+                            Text("\(runner.label) does not have \(pullRequest.slug) yet. It is cloned to \(path) and added to \(runner.label).")
                                 .font(.caption).foregroundStyle(.secondary)
                         case .failure(let problem):
                             Text(problem.localizedDescription).font(.caption).foregroundStyle(.red)
@@ -178,9 +182,10 @@ struct CodeReviewView: View {
                 }
                 .help("Its Claude home, GitHub account and code review message are used, and the card goes on its board.")
                 Picker("Agent", selection: $agent) {
-                    ForEach(Orca.agents, id: \.id) { Text($0.label).tag($0.id) }
+                    if agent.isEmpty { Text("Loading…").tag("") }
+                    ForEach(runner.agents, id: \.id) { Text($0.label).tag($0.id) }
                 }
-                if agent == "claude" {
+                if agentKind.homeVariable != nil {
                     TextField("Claude home", text: $claudeHome, prompt: Text("~/.claude (default)"))
                     if homeMissing {
                         Text("“\(homeTyped)” is not a directory on this Mac.").font(.caption).foregroundStyle(.red)
@@ -189,7 +194,7 @@ struct CodeReviewView: View {
                 GitHubAccountPicker(selection: $githubAccount)
                 TextField("Worktree name", text: $name)
                 Toggle("Add a card to the board", isOn: $addCard)
-                    .help("On: a card for the review goes in In progress, with the session on it, so its status, notifications and time tracking work as for a task. Off: the session is only started in Orca.")
+                    .help("On: a card for the review goes in In progress, with the session on it, so its status, notifications and time tracking work as for a task. Off: the session is only started in \(runner.label).")
                 Section("First message to the agent") {
                     TextEditor(text: $prompt)
                         .font(.callout.monospaced())
@@ -241,20 +246,28 @@ struct CodeReviewView: View {
            CodeReview.pullRequest(copied) != nil {
             link = copied.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        do {
-            repos = try await Orca.repos()
-            parent = Orca.usualParent(of: repos).map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "~"
-        } catch {
-            self.error = "Could not read Orca's repositories: \(error.localizedDescription)"
-        }
-        loading = false
+        await loadRepos()
         adoptPullRequest()
+    }
+
+    private func loadRepos() async {
+        loading = true
+        defer { loading = false }
+        let runner = runner
+        do {
+            repos = try await runner.repos()
+            parent = Sessions.usualParent(of: repos).map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "~"
+            error = nil
+        } catch {
+            repos = []
+            self.error = "Could not read \(runner.label)'s repositories: \(error.localizedDescription)"
+        }
     }
 
     /// A new link: its name, and the space that owns its repository when one does.
     private func adoptPullRequest() {
         guard let pullRequest else { return refill() }
-        name = Orca.worktreeName(ref: "review-\(pullRequest.repoName)-\(pullRequest.number)", title: "")
+        name = Sessions.worktreeName(ref: "review-\(pullRequest.repoName)-\(pullRequest.number)", title: "")
         if let repo, let owner = store.projects.first(where: { $0.owns(repo) }) { spaceId = owner.id }
         refill()
     }
@@ -262,6 +275,14 @@ struct CodeReviewView: View {
     private func adoptSpace() {
         claudeHome = project?.claudeHome ?? ""
         githubAccount = project?.githubAccount ?? ""
+        let chosen = store.runner(for: project)
+        agent = store.agent(for: project, runner: chosen).id
+        if chosen.id != runnerId {
+            // Another runner has other repositories; the first look happens in `prepare`.
+            let first = runnerId.isEmpty
+            runnerId = chosen.id
+            if !first { Task { await loadRepos() } }
+        }
         refill()
     }
 
@@ -282,7 +303,7 @@ struct CodeReviewView: View {
         // Not on every keystroke of a typed link.
         try? await Task.sleep(for: .milliseconds(400))
         guard !Task.isCancelled,
-              let detail = await Orca.pullRequestDetail(url, account: githubAccount), !Task.isCancelled else { return }
+              let detail = await GitHub.pullRequestDetail(url, account: githubAccount), !Task.isCancelled else { return }
         title = detail.title
         refill()
     }
@@ -292,13 +313,14 @@ struct CodeReviewView: View {
         starting = true
         error = nil
         defer { starting = false }
-        let repo: Orca.Repo
+        let runner = runner
+        let repo: SessionRepo
         do {
             if let known = self.repo {
                 repo = known
             } else {
                 progress = "Cloning \(pullRequest.slug)…"
-                repo = try await Orca.cloneRepository(slug: pullRequest.slug, into: parent, account: githubAccount)
+                repo = try await Sessions.cloneRepository(slug: pullRequest.slug, into: parent, account: githubAccount, runner: runner)
                 // Listed from now on, so a second try after a failed start does not clone again.
                 repos.append(repo)
             }
@@ -310,7 +332,7 @@ struct CodeReviewView: View {
         if checkOut {
             progress = "Fetching the pull request…"
             do {
-                base = try await Orca.fetchPullRequest(pullRequest.number, in: repo, account: githubAccount)
+                base = try await GitHub.fetchPullRequest(pullRequest.number, in: repo.path, account: githubAccount)
             } catch {
                 self.error = "The pull request could not be fetched: \(error.localizedDescription) Turn off “Start from the pull request's code” to review it from the default branch."
                 return
@@ -319,10 +341,10 @@ struct CodeReviewView: View {
         progress = "Creating the worktree…"
         let heading = title.isEmpty ? pullRequest.ref : title
         do {
-            let session = try await Orca.start(
-                repo: repo, name: name.trimmingCharacters(in: .whitespaces), agent: agent, prompt: prompt,
+            let session = try await runner.start(SessionLaunch(
+                repo: repo, name: name.trimmingCharacters(in: .whitespaces), agent: agentKind, prompt: prompt,
                 comment: "Review \(pullRequest.ref) \(title)".trimmingCharacters(in: .whitespaces),
-                claudeHome: homeTyped, githubAccount: githubAccount, baseBranch: base)
+                home: homeTyped, githubAccount: githubAccount, baseBranch: base))
             if addCard {
                 // A Jira space would ask Jira about any reference every refresh, so there the
                 // pull request is named in the title instead.
@@ -335,12 +357,12 @@ struct CodeReviewView: View {
                 store.upsert(task)
                 store.addSession(session, to: task.id, repoId: repo.id, githubAccount: githubAccount, remember: false)
             } else {
-                // Nothing in the app leads to this session, so Orca is shown on it.
-                await Orca.reveal(session)
+                // Nothing in the app leads to this session, so the runner is shown on it.
+                await Runners.reveal(session)
             }
             dismiss()
         } catch {
-            self.error = "Orca could not start the session: \(error.localizedDescription)"
+            self.error = "\(runner.label) could not start the session: \(error.localizedDescription)"
         }
     }
 
@@ -351,7 +373,7 @@ struct CodeReviewView: View {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
-        if let current = Orca.resolvedDirectory(parent) { panel.directoryURL = URL(fileURLWithPath: current) }
+        if let current = Sessions.resolvedDirectory(parent) { panel.directoryURL = URL(fileURLWithPath: current) }
         if panel.runModal() == .OK, let url = panel.url {
             parent = (url.path as NSString).abbreviatingWithTildeInPath
         }

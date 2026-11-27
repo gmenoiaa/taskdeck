@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Starts an agent session in Orca for a task: a new checkout of the chosen repository with an agent
-/// that receives the ticket as its first message.
+/// Starts an agent session for a task in the space's runner: a new checkout of the chosen repository
+/// with an agent that receives the ticket as its first message.
 struct StartSessionView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -9,8 +9,10 @@ struct StartSessionView: View {
     /// The ticket as fetched from the tracker. Without it the prompt has only the title and link.
     let detail: TicketDetail?
 
-    @State private var repos: [Orca.Repo] = []
-    /// An Orca repository's id, or one of the two `Self.clone` / `Self.folder` choices below.
+    @State private var repos: [SessionRepo] = []
+    /// The `SessionRunner.id` the session starts in; the space's choice until changed here.
+    @State private var runnerId = ""
+    /// A repository's id in that runner, or one of the two `Self.clone` / `Self.folder` choices below.
     @State private var repoId = ""
     /// What to clone, as typed: "owner/name" or a github.com address.
     @State private var cloneSource = ""
@@ -21,7 +23,8 @@ struct StartSessionView: View {
     @State private var parent = ""
     /// What `start` is doing, shown beside the spinner.
     @State private var progress = ""
-    @State private var agent = Orca.agents[0].id
+    /// An `AgentKind.id`; the space's choice until changed here.
+    @State private var agent = ""
     @State private var name = ""
     @State private var claudeHome = ""
     @State private var githubAccount = ""
@@ -30,28 +33,35 @@ struct StartSessionView: View {
     @State private var starting = false
     @State private var error: String?
 
-    /// Picker choices that make a repository instead of naming one. Orca's ids are UUIDs.
+    /// Picker choices that make a repository instead of naming one. No runner's ids start with "+".
     private static let clone = "+clone"
     private static let folder = "+folder"
 
     private var task: TaskItem? { store.task(taskId) }
     private var project: Project? { store.project(task?.projectId) }
-    private var repo: Orca.Repo? { repos.first { $0.id == repoId } }
+    private var repo: SessionRepo? { repos.first { $0.id == repoId } }
+    private var runner: any SessionRunner { Runners.resolve(runnerId.isEmpty ? nil : runnerId) }
+    private var agentKind: AgentKind { AgentKind.find(agent) ?? runner.agents.first ?? .claude }
+    /// The agent the space or the app asks for, when this runner cannot start it.
+    private var unavailableAgent: String? {
+        let wanted = project?.sessionAgent ?? store.sessionAgent
+        return runner.agents.contains { $0.id == wanted } ? nil : AgentKind.label(wanted)
+    }
     /// The space's own repositories come first in the list; the rest stay reachable below them.
-    private var spaceRepos: [Orca.Repo] {
+    private var spaceRepos: [SessionRepo] {
         guard let project else { return [] }
         return repos.filter(project.owns)
     }
-    private var otherRepos: [Orca.Repo] {
+    private var otherRepos: [SessionRepo] {
         guard let project else { return repos }
         return repos.filter { !project.owns($0) }
     }
     private var homeTyped: String { claudeHome.trimmingCharacters(in: .whitespaces) }
     /// A home that was typed but is not a directory. An empty field is fine: Claude's default.
     private var homeMissing: Bool {
-        agent == "claude" && !homeTyped.isEmpty && Orca.resolvedHome(homeTyped) == nil
+        agentKind.homeVariable != nil && !homeTyped.isEmpty && Sessions.resolvedHome(homeTyped) == nil
     }
-    private var cloneSlug: String? { Orca.githubSlug(cloneSource) }
+    private var cloneSlug: String? { GitHub.slug(cloneSource) }
     /// The folder the clone or the new folder would be, or why it cannot be made. Nil while the
     /// name is still empty, so nothing is complained about before the user typed.
     private var destination: Result<String, Error>? {
@@ -65,7 +75,7 @@ struct StartSessionView: View {
             if name.isEmpty { return nil }
         default: return nil
         }
-        return Result { try Orca.newDirectoryPath(named: name, in: parent) }
+        return Result { try Sessions.newDirectoryPath(named: name, in: parent) }
     }
     private var hasRepository: Bool {
         if repo != nil { return true }
@@ -81,7 +91,7 @@ struct StartSessionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Start session in Orca").font(.title3.weight(.semibold))
+                Text("Start session in \(runner.label)").font(.title3.weight(.semibold))
                 if let task {
                     Text("\(task.displayRef) \(task.title)").foregroundStyle(.secondary).lineLimit(2)
                 }
@@ -90,6 +100,12 @@ struct StartSessionView: View {
             Divider()
 
             Form {
+                if Runners.hasChoice {
+                    Picker("Run in", selection: $runnerId) {
+                        ForEach(Runners.all, id: \.id) { Text($0.label).tag($0.id) }
+                    }
+                    .onChange(of: runnerId) { Task { await runnerChanged() } }
+                }
                 Picker("Repository", selection: $repoId) {
                     if repoId.isEmpty { Text(loading ? "Loading…" : "Choose…").tag("") }
                     if spaceRepos.isEmpty {
@@ -102,21 +118,23 @@ struct StartSessionView: View {
                             ForEach(otherRepos) { Text($0.name).tag($0.id) }
                         }
                     }
-                    Divider()
-                    Text("Clone from GitHub…").tag(Self.clone)
-                    Text("New folder…").tag(Self.folder)
+                    if runner.capabilities.contains(.addRepository) {
+                        Divider()
+                        Text("Clone from GitHub…").tag(Self.clone)
+                        Text("New folder…").tag(Self.folder)
+                    }
                 }
                 .disabled(loading)
                 if repoId == Self.clone {
                     TextField("GitHub repository", text: $cloneSource, prompt: Text("owner/name or its address"))
-                        .help("It is cloned with gh, as the GitHub account chosen below, and added to Orca.")
+                        .help("It is cloned with gh, as the GitHub account chosen below, and added to \(runner.label).")
                     if !cloneSource.trimmingCharacters(in: .whitespaces).isEmpty, cloneSlug == nil {
                         Text("Type it as owner/name, or paste its github.com address.")
                             .font(.caption).foregroundStyle(.red)
                     }
                 } else if repoId == Self.folder {
                     TextField("Folder name", text: $folderName)
-                        .help("An empty folder is created and added to Orca.")
+                        .help("An empty folder is created and added to \(runner.label).")
                     Toggle("Start a git repository in it", isOn: $folderGit)
                         .help("On: git init with one empty commit and no remote, so each session gets its own checkout and branch. Add a remote later with “git remote add”. Off: a plain folder, and sessions work in the folder itself.")
                 }
@@ -139,9 +157,14 @@ struct StartSessionView: View {
                     }
                 }
                 Picker("Agent", selection: $agent) {
-                    ForEach(Orca.agents, id: \.id) { Text($0.label).tag($0.id) }
+                    if agent.isEmpty { Text("Loading…").tag("") }
+                    ForEach(runner.agents, id: \.id) { Text($0.label).tag($0.id) }
                 }
-                if agent == "claude" {
+                if let unavailableAgent {
+                    Text("\(runner.label) cannot start \(unavailableAgent), the default for this space, so \(agentKind.label) is chosen instead.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if agentKind.homeVariable != nil {
                     TextField("Claude home", text: $claudeHome, prompt: Text("~/.claude (default)"))
                         .help("The directory Claude Code keeps its settings, MCP servers and logs in. Remembered for this space.")
                     if homeMissing {
@@ -151,7 +174,7 @@ struct StartSessionView: View {
                 }
                 GitHubAccountPicker(selection: $githubAccount)
                 TextField("Worktree name", text: $name)
-                    .help("Orca creates a new checkout with this name. Its branch name is based on it.")
+                    .help("\(runner.label) creates a new checkout with this name. Its branch name is based on it.")
                 Section("First message to the agent") {
                     TextEditor(text: $prompt)
                         .font(.callout.monospaced())
@@ -188,24 +211,41 @@ struct StartSessionView: View {
 
     private func prepare() async {
         if let task {
-            name = Orca.worktreeName(ref: task.ref, title: detail?.subject ?? task.title)
-            prompt = Orca.prompt(task: task, project: project, detail: detail)
+            name = Sessions.worktreeName(ref: task.ref, title: detail?.subject ?? task.title)
+            prompt = Sessions.prompt(task: task, project: project, detail: detail)
         }
         claudeHome = project?.claudeHome ?? ""
         githubAccount = project?.githubAccount ?? ""
+        let chosen = store.runner(for: project)
+        runnerId = chosen.id
+        agent = store.agent(for: project, runner: chosen).id
+        await loadRepos()
+    }
+
+    /// Another runner has other repositories, and maybe other agents.
+    private func runnerChanged() async {
+        repoId = ""
+        if !runner.agents.contains(where: { $0.id == agent }) { agent = store.agent(for: project, runner: runner).id }
+        await loadRepos()
+    }
+
+    private func loadRepos() async {
+        loading = true
         defer { loading = false }
+        let runner = runner
         do {
-            repos = try await Orca.repos()
-            if let saved = project?.orcaRepoId, repos.contains(where: { $0.id == saved }) {
+            repos = try await runner.repos()
+            if let saved = runner.id == OrcaRunner.id ? project?.orcaRepoId : nil, repos.contains(where: { $0.id == saved }) {
                 repoId = saved
             } else if spaceRepos.count == 1 {
                 repoId = spaceRepos[0].id
             }
             // Beside the space's own repositories when it has any, else where most of them are.
-            parent = Orca.usualParent(of: spaceRepos.isEmpty ? repos : spaceRepos)
+            parent = Sessions.usualParent(of: spaceRepos.isEmpty ? repos : spaceRepos)
                 .map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "~"
         } catch {
-            self.error = "Could not read Orca's repositories: \(error.localizedDescription)"
+            repos = []
+            self.error = "Could not read \(runner.label)'s repositories: \(error.localizedDescription)"
         }
     }
 
@@ -214,17 +254,18 @@ struct StartSessionView: View {
         starting = true
         error = nil
         defer { starting = false }
-        let repo: Orca.Repo
+        let runner = runner
+        let repo: SessionRepo
         do {
             if let chosen = self.repo {
                 repo = chosen
             } else if repoId == Self.clone, let slug = cloneSlug {
                 progress = "Cloning \(slug)…"
-                repo = try await Orca.cloneRepository(slug: slug, into: parent, account: githubAccount)
+                repo = try await Sessions.cloneRepository(slug: slug, into: parent, account: githubAccount, runner: runner)
                 adopt(repo)
             } else if repoId == Self.folder {
                 progress = "Creating the folder…"
-                repo = try await Orca.createFolder(named: folderName, in: parent, git: folderGit)
+                repo = try await Sessions.createFolder(named: folderName, in: parent, git: folderGit, runner: runner)
                 adopt(repo)
             } else {
                 return
@@ -236,15 +277,16 @@ struct StartSessionView: View {
         progress = "Creating the worktree…"
         let comment = [task.displayRef, task.title].filter { !$0.isEmpty }.joined(separator: " ")
         do {
-            let session = try await Orca.start(
+            let agent = agentKind
+            let session = try await runner.start(SessionLaunch(
                 repo: repo, name: name.trimmingCharacters(in: .whitespaces), agent: agent,
-                prompt: prompt, comment: comment, claudeHome: homeTyped, githubAccount: githubAccount)
-            // A Codex session says nothing about the project's Claude home, so it is left as it was.
-            store.addSession(session, to: taskId, repoId: repo.id, claudeHome: agent == "claude" ? homeTyped : nil,
+                prompt: prompt, comment: comment, home: homeTyped, githubAccount: githubAccount))
+            // An agent without a home of its own says nothing about the project's Claude home, so it is left as it was.
+            store.addSession(session, to: taskId, repoId: repo.id, claudeHome: agent.homeVariable != nil ? homeTyped : nil,
                              githubAccount: githubAccount)
             dismiss()
         } catch {
-            self.error = "Orca could not start the session: \(error.localizedDescription)"
+            self.error = "\(runner.label) could not start the session: \(error.localizedDescription)"
         }
     }
 }
@@ -252,7 +294,7 @@ struct StartSessionView: View {
 extension StartSessionView {
     /// Selects a repository that was just made, so a second try after a failed start uses it
     /// instead of cloning or creating it again.
-    private func adopt(_ repo: Orca.Repo) {
+    private func adopt(_ repo: SessionRepo) {
         if !repos.contains(where: { $0.id == repo.id }) {
             repos = (repos + [repo]).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
@@ -266,19 +308,20 @@ extension StartSessionView {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
-        if let current = Orca.resolvedDirectory(parent) { panel.directoryURL = URL(fileURLWithPath: current) }
+        if let current = Sessions.resolvedDirectory(parent) { panel.directoryURL = URL(fileURLWithPath: current) }
         if panel.runModal() == .OK, let url = panel.url {
             parent = (url.path as NSString).abbreviatingWithTildeInPath
         }
     }
 }
 
-/// Ticks the Orca repositories that belong to a space.
+/// Ticks the Orca repositories that belong to a space. `Project.orcaRepoIds` holds Orca's ids,
+/// so this lists Orca's repositories whatever runner the space starts in.
 struct SpaceRepositories: View {
     @Binding var selection: [String]
     /// The organisation whose repositories all belong to the space; empty for none.
     @Binding var organisation: String
-    @State private var repos: [Orca.Repo] = []
+    @State private var repos: [SessionRepo] = []
     @State private var search = ""
     /// The GitHub organisation shown; empty for all of them.
     @State private var owner = ""
@@ -288,7 +331,7 @@ struct SpaceRepositories: View {
     private var owners: [String] {
         Set(repos.compactMap(\.owner)).sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
-    private var shown: [Orca.Repo] {
+    private var shown: [SessionRepo] {
         let query = search.trimmingCharacters(in: .whitespaces)
         return repos.filter { repo in
             (owner.isEmpty || repo.owner == owner)
@@ -301,7 +344,7 @@ struct SpaceRepositories: View {
         loaded && failure == nil ? selection.filter { id in !repos.contains { $0.id == id } } : []
     }
 
-    private func included(_ repo: Orca.Repo) -> Bool {
+    private func included(_ repo: SessionRepo) -> Bool {
         !organisation.isEmpty && repo.owner?.caseInsensitiveCompare(organisation) == .orderedSame
     }
 
@@ -364,7 +407,7 @@ struct SpaceRepositories: View {
             .frame(maxWidth: 260, alignment: .leading)
         }
         .task {
-            do { repos = try await Orca.repos() } catch { failure = error.localizedDescription }
+            do { repos = try await OrcaRunner().repos() } catch { failure = error.localizedDescription }
             loaded = true
         }
     }
@@ -395,7 +438,7 @@ struct GitHubAccountPicker: View {
             ForEach(options, id: \.self) { Text($0).tag($0) }
         }
         .help("The account the agent's gh commands run as. Accounts come from “gh auth login”.")
-        .task { accounts = await Orca.githubAccounts() }
+        .task { accounts = await GitHub.accounts() }
     }
 
     /// The saved account stays selectable even when gh no longer lists it, so it is not silently dropped.
@@ -406,7 +449,7 @@ struct GitHubAccountPicker: View {
 
 /// A small chip for a session: a terminal icon and, when Orca answered, what the session is doing.
 struct SessionBadge: View {
-    let status: Orca.Status?
+    let status: SessionStatus?
     /// How many sessions the task has; shown when there is no status to show instead.
     let count: Int
     /// Icon only, in the status colour, for a card with no room for the word.
@@ -454,7 +497,7 @@ struct PullRequestBadge: View {
     var compact = false
 
     /// A session's pull request, as Orca's status has it.
-    init(status: Orca.Status, compact: Bool = false) {
+    init(status: SessionStatus, compact: Bool = false) {
         switch status.kind {
         case .prMerged: color = .purple
         case .prClosed: color = .secondary
@@ -499,7 +542,7 @@ struct PullRequestBadge: View {
     }
 }
 
-/// The sessions of a task, newest first, each with a way back to it in Orca.
+/// The sessions of a task, newest first, each with a way back to it in its runner.
 struct SessionsList: View {
     @Environment(AppStore.self) private var store
     let taskId: UUID
@@ -518,15 +561,16 @@ struct SessionsList: View {
         VStack(spacing: 6) {
             ForEach(Array(sessions)) { session in
                 let status = store.status(of: session)
+                let runner = Runners.label(of: session)
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 6) {
                             Text(session.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                             SessionBadge(status: status, count: 1)
                         }
-                        Text("\(agentLabel(session.agent))\(session.claudeHome.map { " (\($0))" } ?? "")\(session.githubAccount.map { " · gh \($0)" } ?? "") · \(session.repoName) · \(Self.started.string(from: session.startedAt))")
+                        Text("\(agentLabel(session))\(session.claudeHome.map { " (\($0))" } ?? "")\(session.githubAccount.map { " · gh \($0)" } ?? "") · \(session.repoName) · \(Self.started.string(from: session.startedAt))")
                             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        // What the agent last said, so the user can decide without opening Orca.
+                        // What the agent last said, so the user can decide without opening the runner.
                         if let status, status.kind != .working, let message = status.lastMessage, !message.isEmpty {
                             Text(message).font(.caption).foregroundStyle(.secondary)
                                 .lineLimit(3).textSelection(.enabled)
@@ -539,15 +583,17 @@ struct SessionsList: View {
                     if let pr = status?.prURL {
                         Button("Open PR") { Browser.open(pr, space: store.project(store.task(taskId)?.projectId)) }
                     }
-                    Button("Open in Orca") { Task { await Orca.reveal(session) } }
+                    if Runners.of(session)?.capabilities.contains(.reveal) == true {
+                        Button("Open in \(runner)") { Task { await Runners.reveal(session) } }
+                    }
                     if let id = session.worktreeId, store.removingWorktrees.contains(id) {
-                        ProgressView().controlSize(.small).help("Removing the worktree in Orca…")
+                        ProgressView().controlSize(.small).help("Removing the worktree in \(runner)…")
                     } else if let task = store.task(taskId), store.removableSessions(of: task).contains(session) {
                         Button { removing = [TaskWorktree(taskId: taskId, session: session)] } label: {
                             Image(systemName: "trash")
                         }
                         .buttonStyle(.borderless)
-                        .help("Remove the worktree in Orca: its checkout is deleted.")
+                        .help("Remove the worktree in \(runner): its checkout is deleted.")
                     }
                     // A worktree matched by its name would only be found again on the next refresh.
                     if !session.agent.isEmpty {
@@ -555,7 +601,7 @@ struct SessionsList: View {
                             Image(systemName: "xmark")
                         }
                         .buttonStyle(.borderless)
-                        .help("Remove from this list. The worktree stays in Orca.")
+                        .help("Remove from this list. The worktree stays in \(runner).")
                     }
                 }
                 .padding(10)
@@ -565,7 +611,7 @@ struct SessionsList: View {
         .removingWorktrees($removing)
     }
 
-    private func agentLabel(_ id: String) -> String {
-        id.isEmpty ? "Created in Orca" : Orca.agents.first { $0.id == id }?.label ?? id
+    private func agentLabel(_ session: AgentSession) -> String {
+        session.agent.isEmpty ? "Created in \(Runners.label(of: session))" : AgentKind.label(session.agent)
     }
 }

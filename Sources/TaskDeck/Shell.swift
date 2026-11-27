@@ -1,7 +1,27 @@
 import Foundation
 
+/// A command that ran and refused, with what it said.
+enum ToolFailure: LocalizedError {
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .failed(let message): return message
+        }
+    }
+}
+
 /// Runs command-line tools (orca, gh, claude) off the main thread.
 enum Shell {
+    /// What a failed command said, for an error message: its error output, else its output,
+    /// else its exit status.
+    static func message(_ result: Result, tool: String) -> String {
+        let raw = [result.err, result.out]
+            .compactMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        return raw.map { String($0.prefix(400)) } ?? "\(tool) exited with status \(result.status)."
+    }
+
     struct Result {
         var status: Int32
         var out: Data

@@ -37,7 +37,7 @@ struct ArchiveView: View {
                     Button("Remove \(leftovers.count) Worktree\(leftovers.count == 1 ? "" : "s")…") {
                         removingWorktrees = leftovers
                     }
-                    .help("Remove the worktrees archived tasks left in Orca. One an agent is working in, "
+                    .help("Remove the worktrees archived tasks left behind. One an agent is working in, "
                           + "or that a task on the board also uses, is left alone.")
                 }
                 TextField("Filter", text: $search).textFieldStyle(.roundedBorder).frame(width: 180)
@@ -119,8 +119,8 @@ struct ArchiveView: View {
                 Button { removingWorktrees = worktrees } label: {
                     Label("\(worktrees.count)", systemImage: "arrow.triangle.branch")
                 }
-                .help(worktrees.count == 1 ? "Remove its worktree in Orca (\(worktrees[0].session.name))"
-                                           : "Remove its \(worktrees.count) worktrees in Orca")
+                .help(worktrees.count == 1 ? "Remove its worktree (\(worktrees[0].session.name))"
+                                           : "Remove its \(worktrees.count) worktrees")
             }
             Button("Restore") { store.unarchive(task.id) }
                 .help("Put this task back on the board, in the column it was in")

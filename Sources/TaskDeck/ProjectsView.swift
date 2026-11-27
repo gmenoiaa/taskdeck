@@ -161,8 +161,20 @@ struct ProjectEditor: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                if Orca.isInstalled {
+                if Runners.anyAvailable {
                     Section("Agent sessions") {
+                        if Runners.hasChoice {
+                            Picker("Run sessions in", selection: Binding(get: { project.sessionRunner ?? "" },
+                                                                         set: { project.sessionRunner = $0.isEmpty ? nil : $0 })) {
+                                Text("Default (\(Runners.resolve(store.sessionRunner).label))").tag("")
+                                ForEach(Runners.all, id: \.id) { Text($0.label).tag($0.id) }
+                            }
+                        }
+                        Picker("Agent", selection: Binding(get: { project.sessionAgent ?? "" },
+                                                           set: { project.sessionAgent = $0.isEmpty ? nil : $0 })) {
+                            Text("Default (\(AgentKind.label(store.sessionAgent)))").tag("")
+                            ForEach(AgentKind.all, id: \.id) { Text($0.label).tag($0.id) }
+                        }
                         SpaceRepositories(
                             selection: Binding(get: { project.repoIds }, set: { project.orcaRepoIds = $0 }),
                             organisation: Binding(get: { project.githubOrg ?? "" },
@@ -171,7 +183,7 @@ struct ProjectEditor: View {
                                   prompt: Text("~/.claude (default)"))
                         GitHubAccountPicker(selection: Binding(get: { project.githubAccount ?? "" },
                                                                set: { project.githubAccount = $0.isEmpty ? nil : $0 }))
-                        Text("The repositories are offered first when you start a session from one of this space's tasks, and their Orca worktrees named after a ticket show on that task. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
+                        Text("The agent is preselected when you start a session from one of this space's tasks, and the agent queue uses it. The repositories are offered first, and their Orca worktrees named after a ticket show on that task. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Section("Review") {
@@ -187,7 +199,7 @@ struct ProjectEditor: View {
                             .font(.callout.monospaced())
                             .frame(minHeight: 70)
                         Text("Leave empty for the standard message with the whole ticket. Otherwise write your own, for example “/implement-ticket {ref}”. "
-                             + Orca.placeholders.map { "\($0.name) is \($0.meaning)" }.joined(separator: "; ")
+                             + Sessions.placeholders.map { "\($0.name) is \($0.meaning)" }.joined(separator: "; ")
                              + ". You can still edit the message each time you start a session.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -234,7 +246,7 @@ struct ProjectEditor: View {
         .frame(width: 480)
         // Room for the "Agent sessions" section when it is shown.
         // Capped: with every section showing it would be taller than a laptop screen. The form scrolls.
-        .frame(minHeight: min(720, (project.kind != .other ? 440 : 280) + (Orca.isInstalled ? 370 : 0)))
+        .frame(minHeight: min(720, (project.kind != .other ? 440 : 280) + (Runners.anyAvailable ? 370 : 0)))
         .onAppear {
             apiKey = Keychain.get(account: project.keychainAccount) ?? ""
         }

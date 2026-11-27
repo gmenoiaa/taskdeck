@@ -78,7 +78,7 @@ struct StandupFacts {
         func day(_ date: Date) -> String { date.formatted(.dateTime.day().month(.abbreviated)) }
         // The dates say whether it happened in the period: a pull request merged last week is not
         // yesterday's work, though its session still says "merged".
-        func pullRequestFact(_ number: Int, status: Orca.Status, detail: Orca.PullRequestDetail?) -> String {
+        func pullRequestFact(_ number: Int, status: SessionStatus, detail: GitHub.PullRequestDetail?) -> String {
             var fact = "Pull request #\(number)"
             if let title = detail?.title, !title.isEmpty { fact += " \"\(title)\"" }
             if status.kind == .prOpen, detail?.draft ?? status.prDraft { fact += " (draft)" }

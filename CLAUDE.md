@@ -48,7 +48,13 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
 - A task's pull requests are saved on it (`TaskItem.pullRequests`). `recordPullRequests` adds what
   Orca and the branch lookup report and never removes one; `refreshPullRequestStatuses` reads each
   from GitHub through `gh`. Cards, the detail tab, the bell and the notifications read that saved
-  list, not `Orca.Status`, which knows one pull request per worktree and only while Orca answers.
+  list, not `SessionStatus`, which knows one pull request per worktree and only while its runner answers.
+- Agent sessions run through a `SessionRunner` (`Sessions.swift`); Orca is `OrcaRunner` (`Orca.swift`).
+  Views and the store go through the runner or `Runners`, never a runner type directly, and hide what
+  a runner's `capabilities` lack. The runner and the agent resolve session, then space
+  (`Project.sessionRunner` / `sessionAgent`), then app default. `gh` and `git` calls live in
+  `GitHub.swift`, not in a runner. `Project.orcaRepoIds` are Orca's own ids and mean nothing to
+  another runner.
 - Secrets go in the Keychain (service `local.taskdeck`), never in `data.json` or the repository.
 - macOS 26 Liquid Glass (`GlassEffectContainer`, `.buttonStyle(.glass)`, `.glassEffect`,
   `ToolbarSpacer`) is always behind `if #available(macOS 26, *)` with a pre-26 fallback. Shared

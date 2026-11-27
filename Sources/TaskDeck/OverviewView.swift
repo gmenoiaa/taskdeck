@@ -20,7 +20,7 @@ struct OverviewView: View {
     private struct SessionRow: Identifiable {
         let task: TaskItem
         let session: AgentSession
-        let status: Orca.Status
+        let status: SessionStatus
         var id: UUID { session.id }
     }
 
@@ -53,9 +53,9 @@ struct OverviewView: View {
     /// moves on to the new day by itself. Not saved: it opens on now every time.
     @State private var anchor: Date?
 
-    /// Widgets that can show something here: agent sessions need Orca.
+    /// Widgets that can show something here: agent sessions need a runner.
     private var placements: [OverviewPlacement] {
-        store.overviewPlacements.filter { $0.widget != .sessions || Orca.isInstalled }
+        store.overviewPlacements.filter { $0.widget != .sessions || Runners.anyAvailable }
     }
 
     var body: some View {
@@ -430,7 +430,7 @@ struct OverviewView: View {
         let open = rows.filter { $0.status.kind == .prOpen }
         section(.sessions) {
             if store.sessionStatuses == nil {
-                Text("Orca is not answering, so session status is unknown.").foregroundStyle(.secondary)
+                Text("\(store.runner(for: nil).label) is not answering, so session status is unknown.").foregroundStyle(.secondary)
             } else if waiting.isEmpty && working.isEmpty && open.isEmpty {
                 Text(rows.isEmpty ? "No task on the board has a session." : "Nothing is waiting for you, working, or open for review.")
                     .foregroundStyle(.secondary)
@@ -455,7 +455,7 @@ struct OverviewView: View {
                     }
                     Spacer(minLength: 8)
                     // The same pills as on a board card, and like there they are the links: the pull
-                    // request's opens it, the session's opens it in Orca.
+                    // request's opens it, the session's opens it in its runner.
                     SessionBadges(session: row.session, status: row.status,
                                   space: store.project(row.task.projectId), count: 1)
                 }

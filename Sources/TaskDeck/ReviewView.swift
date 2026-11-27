@@ -118,9 +118,9 @@ struct ReviewSection: View {
             switch item.action {
             case "open_pr":
                 if let pr { Button("Open PR") { Browser.open(pr, space: space) } }
-                else if let session, live { Button("Open in Orca") { Task { await Orca.reveal(session) } } }
+                else if let session, live { Button("Open in \(Runners.label(of: session))") { Task { await Runners.reveal(session) } } }
             case "open_session":
-                if let session, live { Button("Open in Orca") { Task { await Orca.reveal(session) } } }
+                if let session, live { Button("Open in \(Runners.label(of: session))") { Task { await Runners.reveal(session) } } }
                 else if let pr { Button("Open PR") { Browser.open(pr, space: space) } }
             case "open_ticket":
                 // The ticket view in the app, where its comments are; the browser is one click from there.

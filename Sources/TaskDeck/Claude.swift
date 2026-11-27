@@ -272,7 +272,7 @@ enum Claude {
     }
 
     /// An agent session's state in words, for the model.
-    static func sessionState(_ kind: Orca.Status.Kind) -> String {
+    static func sessionState(_ kind: SessionStatus.Kind) -> String {
         switch kind {
         case .working: return "working"
         case .yourTurn: return "waiting for the developer"

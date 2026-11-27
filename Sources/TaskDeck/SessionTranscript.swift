@@ -27,7 +27,7 @@ enum SessionTranscript {
     static func homes(_ typed: [String]) -> [String] {
         let standard = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").path
         var seen: Set<String> = []
-        return ([standard] + typed.compactMap(Orca.resolvedHome)).filter { seen.insert($0).inserted }
+        return ([standard] + typed.compactMap(Sessions.resolvedHome)).filter { seen.insert($0).inserted }
     }
 
     /// The session that last wrote in a worktree, looked for in every home: a worktree created in

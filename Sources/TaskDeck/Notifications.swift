@@ -179,7 +179,7 @@ extension AppStore {
     func noticeSessionChanges() {
         // No answer from Orca says nothing about the sessions, so the last look is kept.
         guard sessionStatuses != nil else { return }
-        var seen: [String: Orca.Status.Kind] = [:]
+        var seen: [String: SessionStatus.Kind] = [:]
         var stopped = false
         for task in tasks where !task.archived {
             for session in sessions(of: task) {
@@ -194,7 +194,7 @@ extension AppStore {
                         : status.kind == .yourTurn ? "Your turn" : "Agent stopped"
                     // The banner says what the agent wants, so the session need not be opened
                     // to find out whether it can wait. A click goes to where it is answered: the
-                    // pull request once there is one, otherwise the session in Orca.
+                    // pull request once there is one, otherwise the session in its runner.
                     let link = status.kind == .prOpen ? status.prURL : nil
                     let session = link == nil ? id : nil
                     if let summary = status.summary {
@@ -214,7 +214,7 @@ extension AppStore {
     /// Works out what is news in GitHub's answer about a pull request, marks it on `pr` as said,
     /// and sends it when `announce`. The first answer only takes note of what is already there,
     /// except an end: a pull request Orca reported as open and GitHub now says is merged is news.
-    func noticePullRequest(_ report: Orca.PullRequestReport, old: TaskPullRequest, new pr: inout TaskPullRequest,
+    func noticePullRequest(_ report: GitHub.PullRequestReport, old: TaskPullRequest, new pr: inout TaskPullRequest,
                            task: TaskItem, announce: Bool) {
         let tell = announce && notify.pullRequests
         var said = Set(old.announced ?? [])
@@ -255,7 +255,7 @@ extension AppStore {
 
     /// New reviews or comments on a session's pull request, in one banner: the weightiest first
     /// (changes asked for, then an approval, then a comment), with who wrote it and how it starts.
-    func announceFeedback(_ fresh: [Orca.PullRequestFeedback.Item], on feedback: Orca.PullRequestFeedback,
+    func announceFeedback(_ fresh: [GitHub.PullRequestFeedback.Item], on feedback: GitHub.PullRequestFeedback,
                           task: TaskItem, page: URL) {
         guard notify.pullRequests, !fresh.isEmpty else { return }
         let lead = fresh.last { $0.kind == .changesRequested } ?? fresh.last { $0.kind == .approved } ?? fresh.last!

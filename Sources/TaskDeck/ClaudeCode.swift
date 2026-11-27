@@ -53,7 +53,7 @@ enum ClaudeCode {
         // Found here: the folders that hold node, which the login's own hooks may call.
         var environment = ["PATH": "/opt/homebrew/bin:/usr/local/bin:" + (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin")]
         if !typed.isEmpty {
-            guard let directory = Orca.resolvedHome(typed) else { throw Failure.homeMissing(typed) }
+            guard let directory = Sessions.resolvedHome(typed) else { throw Failure.homeMissing(typed) }
             // The default home is not a config directory in the variable's sense: its settings file
             // sits beside it, and naming it makes the command report that nobody is signed in.
             let standard = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").path
