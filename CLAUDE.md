@@ -54,7 +54,18 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
   a runner's `capabilities` lack. The runner and the agent resolve session, then space
   (`Project.sessionRunner` / `sessionAgent`), then app default. `gh` and `git` calls live in
   `GitHub.swift`, not in a runner. `Project.orcaRepoIds` are Orca's own ids and mean nothing to
-  another runner.
+  another runner; other runners' ticked repositories are in `Project.runnerRepoIds`.
+- `ClaudeCodeRunner` runs `claude --bg --worktree <name>` in the repository and reads
+  `claude agents --json --all` (per Claude home) for status; never parse `~/.claude/jobs` or the
+  daemon's files, which Claude Code calls internal. Its worktree ids are `claude-code:<short id>`
+  (plus `@<home>` for a non-default Claude home). The folders and homes it knows are in
+  `claude-code.json` beside `data.json`. A repository Claude Code has not been trusted in refuses
+  to start a session: the user runs `claude` there once.
+- `claude --bg` hands the session to a background service that keeps the environment it started
+  with, so environment variables set when starting a session do not reach it (only
+  `CLAUDE_CONFIG_DIR` works, because each home has its own service). The GitHub account goes in a
+  `--settings` SessionStart hook that writes `export GH_TOKEN="$(gh auth token --user …)"` to the
+  session's env file: the command, never the token, since that file stays on disk world-readable.
 - Secrets go in the Keychain (service `local.taskdeck`), never in `data.json` or the repository.
 - macOS 26 Liquid Glass (`GlassEffectContainer`, `.buttonStyle(.glass)`, `.glassEffect`,
   `ToolbarSpacer`) is always behind `if #available(macOS 26, *)` with a pre-26 fallback. Shared

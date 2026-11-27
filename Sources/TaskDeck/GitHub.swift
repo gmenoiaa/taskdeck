@@ -320,7 +320,7 @@ enum GitHub {
 
     // MARK: Running gh
 
-    private static var executable: String? {
+    static var executable: String? {
         ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }

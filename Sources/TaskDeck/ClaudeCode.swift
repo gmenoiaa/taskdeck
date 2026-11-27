@@ -44,11 +44,9 @@ enum ClaudeCode {
     static var executable: String? { Shell.find("claude") }
     static var isInstalled: Bool { executable != nil }
 
-    /// `home` is a Claude home as typed ("~/.claude-work"); empty means the default one.
-    /// `schema` is the JSON Schema the answer has to match.
-    static func ask<Value: Decodable>(_ type: Value.Type, home: String, model: String, system: String,
-                                      user: String, schema: [String: Any]) async throws -> Answer<Value> {
-        guard let executable else { throw Failure.notInstalled }
+    /// What the command needs besides this app's own environment to run as the given Claude home
+    /// ("~/.claude-work" as typed; empty for the default one).
+    static func environment(home: String) throws -> [String: String] {
         let typed = home.trimmingCharacters(in: .whitespaces)
         // Found here: the folders that hold node, which the login's own hooks may call.
         var environment = ["PATH": "/opt/homebrew/bin:/usr/local/bin:" + (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin")]
@@ -56,11 +54,23 @@ enum ClaudeCode {
             guard let directory = Sessions.resolvedHome(typed) else { throw Failure.homeMissing(typed) }
             // The default home is not a config directory in the variable's sense: its settings file
             // sits beside it, and naming it makes the command report that nobody is signed in.
-            let standard = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").path
-            if URL(fileURLWithPath: directory).standardizedFileURL.path != standard {
-                environment["CLAUDE_CONFIG_DIR"] = directory
-            }
+            if !isStandardHome(directory) { environment["CLAUDE_CONFIG_DIR"] = directory }
         }
+        return environment
+    }
+
+    static func isStandardHome(_ directory: String) -> Bool {
+        let standard = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").path
+        return URL(fileURLWithPath: directory).standardizedFileURL.path == standard
+    }
+
+    /// `home` is a Claude home as typed ("~/.claude-work"); empty means the default one.
+    /// `schema` is the JSON Schema the answer has to match.
+    static func ask<Value: Decodable>(_ type: Value.Type, home: String, model: String, system: String,
+                                      user: String, schema: [String: Any]) async throws -> Answer<Value> {
+        guard let executable else { throw Failure.notInstalled }
+        let typed = home.trimmingCharacters(in: .whitespaces)
+        let environment = try environment(home: home)
         let schemaText = String(data: try JSONSerialization.data(withJSONObject: schema), encoding: .utf8) ?? "{}"
         // An empty folder of its own: no project instructions or settings are picked up from it.
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("taskdeck-review", isDirectory: true)

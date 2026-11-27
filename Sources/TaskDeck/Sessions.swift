@@ -257,7 +257,7 @@ protocol SessionRunner: Sendable {
 
 /// The runners this build knows, and the lookups the store and the views share.
 enum Runners {
-    static let all: [any SessionRunner] = [OrcaRunner()]
+    static let all: [any SessionRunner] = [OrcaRunner(), ClaudeCodeRunner()]
     static let defaultId = OrcaRunner.id
 
     /// The runner saved under `id`; nil for one this build does not have.

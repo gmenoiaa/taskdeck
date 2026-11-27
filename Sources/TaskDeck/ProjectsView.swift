@@ -175,15 +175,17 @@ struct ProjectEditor: View {
                             Text("Default (\(AgentKind.label(store.sessionAgent)))").tag("")
                             ForEach(AgentKind.all, id: \.id) { Text($0.label).tag($0.id) }
                         }
+                        let runner = store.runner(for: project)
                         SpaceRepositories(
-                            selection: Binding(get: { project.repoIds }, set: { project.orcaRepoIds = $0 }),
+                            runner: runner,
+                            selection: Binding(get: { project.repoIds(on: runner.id) }, set: { project.setRepoIds($0, on: runner.id) }),
                             organisation: Binding(get: { project.githubOrg ?? "" },
                                                   set: { project.githubOrg = $0.isEmpty ? nil : $0 }))
                         TextField("Claude home", text: Binding(get: { project.claudeHome ?? "" }, set: { project.claudeHome = $0 }),
                                   prompt: Text("~/.claude (default)"))
                         GitHubAccountPicker(selection: Binding(get: { project.githubAccount ?? "" },
                                                                set: { project.githubAccount = $0.isEmpty ? nil : $0 }))
-                        Text("The agent is preselected when you start a session from one of this space's tasks, and the agent queue uses it. The repositories are offered first, and their Orca worktrees named after a ticket show on that task. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
+                        Text("The agent is preselected when you start a session from one of this space's tasks, and the agent queue uses it. The repositories are offered first, and their worktrees named after a ticket show on that task. Sessions also use the directory Claude Code keeps its settings, MCP servers and logs in, and the account the agent's gh commands run as.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Section("Review") {

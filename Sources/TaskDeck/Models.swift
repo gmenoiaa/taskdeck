@@ -131,6 +131,9 @@ struct Project: Identifiable, Codable, Hashable {
     /// The `AgentKind.id` preselected for this space's sessions and used by the agent queue; nil
     /// follows the app's default.
     var sessionAgent: String?
+    /// The repositories ticked for this space in runners other than Orca, by `SessionRunner.id`.
+    /// Orca's stay in `orcaRepoIds`, where files from before there was a choice keep them.
+    var runnerRepoIds: [String: [String]]?
 
     static let palette: [Color] = [.blue, .orange, .green, .purple, .pink, .teal, .red, .indigo]
     var color: Color { Project.palette[abs(colorIndex) % Project.palette.count] }
@@ -140,7 +143,22 @@ struct Project: Identifiable, Codable, Hashable {
     var repoIds: [String] { orcaRepoIds ?? [orcaRepoId].compactMap { $0 } }
 
     /// The repositories ticked for this space in the given runner.
-    func repoIds(on runner: String) -> [String] { runner == OrcaRunner.id ? repoIds : [] }
+    func repoIds(on runner: String) -> [String] {
+        runner == OrcaRunner.id ? repoIds : runnerRepoIds?[runner] ?? []
+    }
+
+    mutating func setRepoIds(_ ids: [String], on runner: String) {
+        if runner == OrcaRunner.id {
+            orcaRepoIds = ids
+        } else {
+            var all = runnerRepoIds ?? [:]
+            all[runner] = ids.isEmpty ? nil : ids
+            runnerRepoIds = all.isEmpty ? nil : all
+        }
+    }
+
+    /// Whether the space has repositories ticked in any runner.
+    var hasRepositories: Bool { !repoIds.isEmpty || !(runnerRepoIds ?? [:]).values.allSatisfy(\.isEmpty) }
 
     /// The space's repositories among those a runner has: the ticked ones plus every repository of
     /// its GitHub organisation, so one added later belongs to the space without another step.
