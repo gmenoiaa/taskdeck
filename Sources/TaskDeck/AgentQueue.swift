@@ -102,7 +102,7 @@ extension AppStore {
             guard let repo else {
                 setQueueNote(TaskItem.needsRepository, for: task.id)
                 if notify.sessions {
-                    Notifier.send(title: "Which repository?",
+                    Notifier.send(kind: .sessions, title: "Which repository?",
                                   body: "\(task.displayRef) \(task.title)".trimmingCharacters(in: .whitespaces)
                                     + " is waiting in the agent queue for you to pick one.")
                 }
@@ -135,7 +135,7 @@ extension AppStore {
         save()
         // A task that needs a repository has its own, clearer notification.
         if note != TaskItem.needsRepository, notify.sessions {
-            Notifier.send(title: "Agent not started",
+            Notifier.send(kind: .sessions, title: "Agent not started",
                           body: "\(tasks[i].displayRef) \(tasks[i].title)".trimmingCharacters(in: .whitespaces) + "\n\(note)")
         }
     }

@@ -82,11 +82,11 @@ extension AppStore {
         let spent = Fmt.short(now.timeIntervalSince(since))
         if let task = likelyTask {
             let name = "\(task.displayRef) \(task.title)".trimmingCharacters(in: .whitespaces)
-            Notifier.send(title: "No timer running",
+            Notifier.send(kind: .time, title: "No timer running",
                           body: "You have been at the Mac for \(spent). An agent is active on \(name).",
                           startTask: task.id, since: since)
         } else {
-            Notifier.send(title: "No timer running",
+            Notifier.send(kind: .time, title: "No timer running",
                           body: "You have been at the Mac for \(spent) with nothing being tracked.")
         }
     }

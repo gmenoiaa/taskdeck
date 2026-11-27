@@ -38,6 +38,9 @@ struct NotificationSettings: Codable, Equatable {
     var standup = true
     /// A task's reminder came due.
     var reminders = true
+    /// The channels besides this Mac's banners, by `NotificationChannel.id`: whether each is on
+    /// and which kinds go to it.
+    var channels: [String: ChannelSettings] = [:]
 
     enum DockBadge: String, Codable { case waiting, timer, none }
 
@@ -64,6 +67,7 @@ struct NotificationSettings: Codable, Equatable {
         sound = try c.decodeIfPresent(String.self, forKey: .sound) ?? ""
         standup = try c.decodeIfPresent(Bool.self, forKey: .standup) ?? true
         reminders = try c.decodeIfPresent(Bool.self, forKey: .reminders) ?? true
+        channels = try c.decodeIfPresent([String: ChannelSettings].self, forKey: .channels) ?? [:]
     }
 }
 
@@ -198,9 +202,9 @@ extension AppStore {
                     let link = status.kind == .prOpen ? status.prURL : nil
                     let session = link == nil ? id : nil
                     if let summary = status.summary {
-                        Notifier.send(title: title, subtitle: label(task), body: summary, session: session, link: link)
+                        Notifier.send(kind: .sessions, title: title, subtitle: label(task), body: summary, session: session, link: link)
                     } else {
-                        Notifier.send(title: title, body: label(task), session: session, link: link)
+                        Notifier.send(kind: .sessions, title: title, body: label(task), session: session, link: link)
                     }
                 case .working, .gone, .prMerged, .prClosed:
                     break
@@ -231,7 +235,7 @@ extension AppStore {
 
         if let state = pr.state, state == "merged" || state == "closed" {
             if said.insert(state).inserted, tell, old.state == "open" {
-                Notifier.send(title: "Pull request #\(pr.number) \(state == "merged" ? "merged" : "closed without merging")",
+                Notifier.send(kind: .pullRequests, title: "Pull request #\(pr.number) \(state == "merged" ? "merged" : "closed without merging")",
                               body: label(task), link: pr.url)
             }
         } else {
@@ -244,10 +248,10 @@ extension AppStore {
             said = said.filter { !$0.contains(":") || $0.hasSuffix(":" + sha) }
             let first = old.checkedAt == nil
             if pr.checks == "failing", said.insert("checks:" + sha).inserted, tell, !first {
-                Notifier.send(title: "Checks failed on pull request #\(pr.number)", body: label(task), link: pr.url)
+                Notifier.send(kind: .pullRequests, title: "Checks failed on pull request #\(pr.number)", body: label(task), link: pr.url)
             }
             if pr.conflict == true, said.insert("conflict:" + sha).inserted, tell, !first {
-                Notifier.send(title: "Pull request #\(pr.number) has a merge conflict", body: label(task), link: pr.url)
+                Notifier.send(kind: .pullRequests, title: "Pull request #\(pr.number) has a merge conflict", body: label(task), link: pr.url)
             }
         }
         pr.announced = said.isEmpty ? nil : said.sorted()
@@ -272,7 +276,7 @@ extension AppStore {
             .trimmingCharacters(in: .whitespaces)
         var body = text.isEmpty ? lead.author : "\(lead.author): \(text.count > 200 ? String(text.prefix(199)) + "…" : text)"
         if fresh.count > 1 { body += " (and \(fresh.count - 1) more)" }
-        Notifier.send(title: title, subtitle: label(task), body: body, link: page)
+        Notifier.send(kind: .pullRequests, title: title, subtitle: label(task), body: body, link: page)
     }
 
     /// The two reminders about time: stopped time not logged at the end of the day, and a timer that
@@ -287,7 +291,7 @@ extension AppStore {
             standupRemindedAt[space.id] = now
             save()
             let time = meeting.formatted(date: .omitted, time: .shortened)
-            Notifier.send(title: "Standup at \(time) · \(space.name)",
+            Notifier.send(kind: .standup, title: "Standup at \(time) · \(space.name)",
                           body: currentStandup(space, now: now) == nil
                               ? "Click to have the update written."
                               : "Your update is written. Click to open and copy it.",
@@ -305,7 +309,7 @@ extension AppStore {
                     let times = Int(entry.duration(now: now) / step)
                     guard times >= 1, times > (longTimerReminders[entry.id] ?? 0) else { continue }
                     longTimerReminders[entry.id] = times
-                    Notifier.send(title: "Timer still running",
+                    Notifier.send(kind: .time, title: "Timer still running",
                                   body: "\(label(task)) has been running for \(Fmt.short(entry.duration(now: now))).")
                 }
             }
@@ -318,7 +322,7 @@ extension AppStore {
             unloggedRemindedAt = now
             save()
             let where_ = pending.count == 1 ? label(pending[0]) : "\(pending.count) tasks"
-            Notifier.send(title: "Time not logged yet", body: "\(Fmt.short(seconds)) on \(where_) is not on Redmine yet.")
+            Notifier.send(kind: .time, title: "Time not logged yet", body: "\(Fmt.short(seconds)) on \(where_) is not on Redmine yet.")
         }
     }
 }
@@ -370,6 +374,11 @@ enum Notifier {
 
     /// Set by the store from `NotificationSettings.sound`.
     static var sound = ""
+    /// Set by the store from `NotificationSettings.channels`.
+    static var channelSettings: [String: ChannelSettings] = [:]
+
+    /// Where notifications go besides this Mac's banners.
+    static let channels: [any NotificationChannel] = [PushoverChannel()]
 
     /// The sounds that can be picked: the system's alert sounds that build.sh copied into the
     /// bundle. Empty when running without the bundle.
@@ -419,13 +428,16 @@ enum Notifier {
             UNNotificationCategory(identifier: reminderCategory, actions: [hour, tomorrow], intentIdentifiers: [])])
     }
 
+    /// Shows a banner on this Mac and hands the same text to every channel that is on and takes
+    /// `kind`. Whether `kind` is wanted at all is decided by the caller, from `NotificationSettings`.
     /// With `reminder`, it carries the snooze buttons and a click opens that task.
     /// With `startTask`, the notification carries a "Start Timer" button for that task, counting
     /// from `since`. A click opens the standup, else the agent session (a worktree id) in Orca,
     /// else the link; with none of them it only brings the app forward.
-    static func send(title: String, subtitle: String? = nil, body: String, startTask: UUID? = nil,
+    static func send(kind: Notice.Kind, title: String, subtitle: String? = nil, body: String, startTask: UUID? = nil,
                      since: Date? = nil, standup: UUID? = nil, session: String? = nil, link: URL? = nil,
                      reminder: (task: UUID, id: UUID)? = nil) {
+        forward(Notice(kind: kind, title: title, subtitle: subtitle, body: body, link: link))
         guard available else { return }
         let content = UNMutableNotificationContent()
         content.title = title
@@ -452,8 +464,22 @@ enum Notifier {
         record(title: title, body: body, problem: nil)
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)) { error in
-                if let error { record(title: title, body: body, problem: error.localizedDescription) }
+                if let error { record(title: title, body: body, problem: "macOS refused it: " + error.localizedDescription) }
             }
+    }
+
+    /// Hands the notice to the channels that are on, set up and take its kind. Each one on its own:
+    /// a slow or failing service holds up nothing else. A failure goes in the list of what was sent.
+    private static func forward(_ notice: Notice) {
+        for channel in channels where channelSettings[channel.id]?.sends(notice.kind) == true && channel.isConfigured {
+            Task {
+                do {
+                    try await channel.deliver(notice)
+                } catch {
+                    record(title: notice.title, body: notice.text, problem: "\(channel.label) did not take it: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     // MARK: What was sent

@@ -105,7 +105,7 @@ extension AppStore {
         let fresh = current.filter { !known.contains($0.id) && !ignoredAssigned.contains($0.id) }
         guard notify.assigned, !fresh.isEmpty else { return }
         let lines = fresh.prefix(4).map { "\($0.displayRef) \($0.title)" }.joined(separator: "\n")
-        Notifier.send(title: fresh.count == 1 ? "Ticket assigned to you" : "\(fresh.count) tickets assigned to you",
+        Notifier.send(kind: .assigned, title: fresh.count == 1 ? "Ticket assigned to you" : "\(fresh.count) tickets assigned to you",
                       body: lines + (fresh.count > 4 ? "\n…" : ""))
     }
 }
