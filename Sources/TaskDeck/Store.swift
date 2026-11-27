@@ -872,12 +872,12 @@ final class AppStore {
         guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
         tasks[i].sessions = (tasks[i].sessions ?? []) + [session]
         if remember, let p = projects.firstIndex(where: { $0.id == tasks[i].projectId }) {
-            // The space keeps repository ids for Orca only; another runner's mean nothing there.
-            if session.runnerId == OrcaRunner.id {
-                projects[p].orcaRepoId = repoId
-                // A repository used for a space's task belongs to that space from then on.
-                if !projects[p].repoIds.contains(repoId) { projects[p].orcaRepoIds = projects[p].repoIds + [repoId] }
-            }
+            // A repository used for a space's task belongs to that space from then on, in that runner.
+            let runner = session.runnerId
+            if runner == OrcaRunner.id { projects[p].orcaRepoId = repoId }
+            let ids = projects[p].repoIds(on: runner)
+            // Last used last: the start sheet preselects it next time.
+            projects[p].setRepoIds(ids.filter { $0 != repoId } + [repoId], on: runner)
             projects[p].githubAccount = githubAccount.isEmpty ? nil : githubAccount
             if let claudeHome { projects[p].claudeHome = claudeHome.isEmpty ? nil : claudeHome }
         }
@@ -905,7 +905,7 @@ final class AppStore {
             knownReposAt = .distantPast
         }
         guard !refreshingSessions else { return }
-        let spaces = projects.filter { !$0.repoIds.isEmpty || !($0.githubOrg ?? "").isEmpty }
+        let spaces = projects.filter { $0.hasRepositories || !($0.githubOrg ?? "").isEmpty }
         guard !spaces.isEmpty || !queueWaiting.isEmpty
                 || tasks.contains(where: { !$0.archived && !($0.sessions ?? []).isEmpty }) else { return }
         refreshingSessions = true

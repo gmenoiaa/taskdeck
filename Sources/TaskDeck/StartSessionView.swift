@@ -12,7 +12,7 @@ struct StartSessionView: View {
     @State private var repos: [SessionRepo] = []
     /// The `SessionRunner.id` the session starts in; the space's choice until changed here.
     @State private var runnerId = ""
-    /// A repository's id in that runner, or one of the two `Self.clone` / `Self.folder` choices below.
+    /// A repository's id in that runner, or one of the `Self.clone` / `Self.folder` / `Self.existing` choices below.
     @State private var repoId = ""
     /// What to clone, as typed: "owner/name" or a github.com address.
     @State private var cloneSource = ""
@@ -36,6 +36,8 @@ struct StartSessionView: View {
     /// Picker choices that make a repository instead of naming one. No runner's ids start with "+".
     private static let clone = "+clone"
     private static let folder = "+folder"
+    /// A folder already on this Mac that the runner does not list yet. `parent` holds its path.
+    private static let existing = "+existing"
 
     private var task: TaskItem? { store.task(taskId) }
     private var project: Project? { store.project(task?.projectId) }
@@ -73,6 +75,14 @@ struct StartSessionView: View {
         case Self.folder:
             name = folderName.trimmingCharacters(in: .whitespaces)
             if name.isEmpty { return nil }
+        case Self.existing:
+            if parent.trimmingCharacters(in: .whitespaces).isEmpty { return nil }
+            return Result {
+                guard let path = Sessions.resolvedDirectory(parent) else {
+                    throw ToolFailure.failed("“\(parent)” is not a folder on this Mac.")
+                }
+                return path
+            }
         default: return nil
         }
         return Result { try Sessions.newDirectoryPath(named: name, in: parent) }
@@ -122,6 +132,8 @@ struct StartSessionView: View {
                         Divider()
                         Text("Clone from GitHub…").tag(Self.clone)
                         Text("New folder…").tag(Self.folder)
+                        // Orca adds existing folders in its own window; another runner takes them here.
+                        if runner.id != OrcaRunner.id { Text("Existing folder…").tag(Self.existing) }
                     }
                 }
                 .disabled(loading)
@@ -138,8 +150,8 @@ struct StartSessionView: View {
                     Toggle("Start a git repository in it", isOn: $folderGit)
                         .help("On: git init with one empty commit and no remote, so each session gets its own checkout and branch. Add a remote later with “git remote add”. Off: a plain folder, and sessions work in the folder itself.")
                 }
-                if repoId == Self.clone || repoId == Self.folder {
-                    LabeledContent(repoId == Self.clone ? "Clone into" : "Create in") {
+                if repoId == Self.clone || repoId == Self.folder || repoId == Self.existing {
+                    LabeledContent(repoId == Self.clone ? "Clone into" : repoId == Self.folder ? "Create in" : "Folder") {
                         HStack(spacing: 6) {
                             TextField("Parent folder", text: $parent, prompt: Text("~/Workspace"))
                                 .labelsHidden()
@@ -235,7 +247,9 @@ struct StartSessionView: View {
         let runner = runner
         do {
             repos = try await runner.repos()
-            if let saved = runner.id == OrcaRunner.id ? project?.orcaRepoId : nil, repos.contains(where: { $0.id == saved }) {
+            // The one used last in this space and runner.
+            let saved = runner.id == OrcaRunner.id ? project?.orcaRepoId : project?.repoIds(on: runner.id).last
+            if let saved, repos.contains(where: { $0.id == saved }) {
                 repoId = saved
             } else if spaceRepos.count == 1 {
                 repoId = spaceRepos[0].id
@@ -262,6 +276,10 @@ struct StartSessionView: View {
             } else if repoId == Self.clone, let slug = cloneSlug {
                 progress = "Cloning \(slug)…"
                 repo = try await Sessions.cloneRepository(slug: slug, into: parent, account: githubAccount, runner: runner)
+                adopt(repo)
+            } else if repoId == Self.existing, case .success(let path) = destination {
+                progress = "Adding the folder…"
+                repo = try await runner.addRepository(path: path)
                 adopt(repo)
             } else if repoId == Self.folder {
                 progress = "Creating the folder…"
@@ -315,9 +333,10 @@ extension StartSessionView {
     }
 }
 
-/// Ticks the Orca repositories that belong to a space. `Project.orcaRepoIds` holds Orca's ids,
-/// so this lists Orca's repositories whatever runner the space starts in.
+/// Ticks the repositories that belong to a space, among those of the runner its sessions start in.
+/// Each runner has ids of its own, so the ticks are kept per runner.
 struct SpaceRepositories: View {
+    let runner: any SessionRunner
     @Binding var selection: [String]
     /// The organisation whose repositories all belong to the space; empty for none.
     @Binding var organisation: String
@@ -339,7 +358,7 @@ struct SpaceRepositories: View {
         }
     }
     private var allShownTicked: Bool { shown.allSatisfy { selection.contains($0.id) } }
-    /// Saved ids that Orca no longer lists. Shown so they can be removed instead of lingering unseen.
+    /// Saved ids that the runner no longer lists. Shown so they can be removed instead of lingering unseen.
     private var missing: [String] {
         loaded && failure == nil ? selection.filter { id in !repos.contains { $0.id == id } } : []
     }
@@ -355,7 +374,7 @@ struct SpaceRepositories: View {
                 ForEach(owners.contains(organisation) || organisation.isEmpty ? owners : owners + [organisation],
                         id: \.self) { Text($0).tag($0) }
             }
-            .help("Every Orca repository of this organisation belongs to the space, including ones added later.")
+            .help("Every \(runner.label) repository of this organisation belongs to the space, including ones added later.")
         }
         LabeledContent("Repositories") {
             VStack(alignment: .leading, spacing: 6) {
@@ -364,7 +383,7 @@ struct SpaceRepositories: View {
                 } else if !loaded {
                     ProgressView().controlSize(.small)
                 } else if repos.isEmpty {
-                    Text("Orca has no repositories yet.").font(.caption).foregroundStyle(.secondary)
+                    Text("\(runner.label) has no repositories yet. Add one when you start a session.").font(.caption).foregroundStyle(.secondary)
                 } else {
                     if owners.count > 1 {
                         HStack(spacing: 6) {
@@ -373,7 +392,7 @@ struct SpaceRepositories: View {
                                 ForEach(owners, id: \.self) { Text($0).tag($0) }
                             }
                             .labelsHidden()
-                            // Only with an organisation chosen: ticking every repository Orca has is never wanted.
+                            // Only with an organisation chosen: ticking every repository there is is never wanted.
                             if !owner.isEmpty, !shown.isEmpty {
                                 Button(allShownTicked ? "Untick all" : "Tick all") { tickShown(!allShownTicked) }
                                     .controlSize(.small)
@@ -395,7 +414,7 @@ struct SpaceRepositories: View {
                                 }
                             }
                             ForEach(missing, id: \.self) { id in
-                                Toggle("No longer in Orca", isOn: binding(id)).toggleStyle(.checkbox)
+                                Toggle("No longer in \(runner.label)", isOn: binding(id)).toggleStyle(.checkbox)
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -406,8 +425,11 @@ struct SpaceRepositories: View {
             }
             .frame(maxWidth: 260, alignment: .leading)
         }
-        .task {
-            do { repos = try await OrcaRunner().repos() } catch { failure = error.localizedDescription }
+        // Again when the space is moved to another runner in the same editor.
+        .task(id: runner.id) {
+            loaded = false
+            failure = nil
+            do { repos = try await runner.repos() } catch { repos = []; failure = error.localizedDescription }
             loaded = true
         }
     }
