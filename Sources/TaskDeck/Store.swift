@@ -182,11 +182,28 @@ final class AppStore {
         var schema: Int?
         /// When each synced record last changed or was deleted.
         var sync: SyncMeta?
+        /// This Mac's sync: whether it is on, and the other Macs by tailnet name. Not synced.
+        var syncEnabled: Bool?
+        var syncPeers: [String]?
     }
 
     /// Stamps of the synced records, and the records as last saved, to see what a save changes.
-    @ObservationIgnored private var syncMeta = SyncMeta()
-    @ObservationIgnored private var savedRecords: [String: Data] = [:]
+    @ObservationIgnored var syncMeta = SyncMeta()
+    @ObservationIgnored var savedRecords: [String: Data] = [:]
+    /// Syncing with the user's other Macs over Tailscale (`PeerSync.swift`).
+    var syncEnabled = false
+    var syncPeers: [String] = []
+    var peerStatus: [String: PeerStatus] = [:]
+    /// Why this Mac is not answering other Macs; nil while it listens.
+    var syncServerProblem: String?
+    var syncListening: String?
+    @ObservationIgnored var peerServer: PeerServer?
+    @ObservationIgnored var syncTask: Task<Void, Never>?
+    @ObservationIgnored var syncLoop: Task<Void, Never>?
+    /// Set while merged records are put in place, so that save does not send them straight back.
+    @ObservationIgnored var applyingSync = false
+    /// The records as last sent to or received from the other Macs, to tell whether a save has anything new for them.
+    @ObservationIgnored var syncedRecords: [String: Data] = [:]
     /// Why this run must not write `data.json`: it was written by a newer TaskDeck, whose fields
     /// this one would drop, or it could not be read and writing would replace it with almost nothing.
     @ObservationIgnored private(set) var saveBlocked: String?
@@ -210,6 +227,8 @@ final class AppStore {
                 alert.runModal()
             }
         }
+        // After launch: listening and the first sync must not hold up the window.
+        Task { @MainActor [weak self] in self?.applySyncSettings() }
         // Said outright: whether `didSet` runs for values set during init is easy to get wrong.
         Notifier.sound = notify.sound
         Notifier.channelSettings = notify.channels
@@ -411,38 +430,7 @@ final class AppStore {
         let (read, blocked) = Self.read(data, decoder: decoder)
         saveBlocked = blocked
         if let snap = read {
-            syncMeta = snap.sync ?? SyncMeta()
-            savedRecords = snap.syncRecords()
-            projects = snap.projects
-            tasks = snap.tasks
-            if let saved = snap.columns, !saved.isEmpty { columns = saved }
-            adoptOrphans()
-            singleTimer = snap.singleTimer ?? false
-            claudeModel = snap.claudeModel ?? Claude.defaultModel
-            aiInstructions = snap.aiInstructions ?? ""
-            autoLogComment = snap.autoLogComment ?? false
-            awaySince = snap.awaySince
-            agentQueueLimit = snap.agentQueueLimit ?? 2
-            agentQueueSkipPermissions = snap.agentQueueSkipPermissions ?? true
-            agentQueueAskClaude = snap.agentQueueAskClaude ?? false
-            notify = snap.notify ?? NotificationSettings()
-            knownAssigned = snap.knownAssigned.map(Set.init)
-            clearedWaiting = Set(snap.clearedWaiting ?? [])
-            pullRequestFeedbackSeen = snap.pullRequestFeedbackSeen ?? [:]
-            ignoredAssigned = Set(snap.ignoredAssigned ?? [])
-            unloggedRemindedAt = snap.unloggedRemindedAt
-            goals = snap.goals ?? []
-            standups = Self.byUUID(snap.standups)
-            standupRemindedAt = Self.byUUID(snap.standupRemindedAt)
-            review = snap.review
-            reviewHome = snap.reviewHome ?? ""
-            reviewModel = snap.reviewModel ?? ClaudeCode.defaultModel
-            reviewWhenSessionStops = snap.reviewWhenSessionStops ?? false
-            reviewDismissed = snap.reviewDismissed ?? [:]
-            overviewLayout = snap.overviewLayout ?? []
-            codeReviewPrompt = snap.codeReviewPrompt ?? ""
-            sessionRunner = snap.sessionRunner ?? Runners.defaultId
-            sessionAgent = snap.sessionAgent ?? AgentKind.claude.id
+            adopt(snap)
         } else if data == nil, !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
@@ -451,6 +439,45 @@ final class AppStore {
             ]
             save()
         }
+    }
+
+    /// Puts a snapshot's contents in place: at launch, and after merging another Mac's records.
+    /// The records it holds count as saved, so the next save stamps only what changes after it.
+    func adopt(_ snap: Snapshot) {
+        syncMeta = snap.sync ?? SyncMeta()
+        savedRecords = snap.syncRecords()
+        projects = snap.projects
+        tasks = snap.tasks
+        if let saved = snap.columns, !saved.isEmpty { columns = saved }
+        adoptOrphans()
+        singleTimer = snap.singleTimer ?? false
+        claudeModel = snap.claudeModel ?? Claude.defaultModel
+        aiInstructions = snap.aiInstructions ?? ""
+        autoLogComment = snap.autoLogComment ?? false
+        awaySince = snap.awaySince
+        agentQueueLimit = snap.agentQueueLimit ?? 2
+        agentQueueSkipPermissions = snap.agentQueueSkipPermissions ?? true
+        agentQueueAskClaude = snap.agentQueueAskClaude ?? false
+        notify = snap.notify ?? NotificationSettings()
+        knownAssigned = snap.knownAssigned.map(Set.init)
+        clearedWaiting = Set(snap.clearedWaiting ?? [])
+        pullRequestFeedbackSeen = snap.pullRequestFeedbackSeen ?? [:]
+        ignoredAssigned = Set(snap.ignoredAssigned ?? [])
+        unloggedRemindedAt = snap.unloggedRemindedAt
+        goals = snap.goals ?? []
+        standups = Self.byUUID(snap.standups)
+        standupRemindedAt = Self.byUUID(snap.standupRemindedAt)
+        review = snap.review
+        reviewHome = snap.reviewHome ?? ""
+        reviewModel = snap.reviewModel ?? ClaudeCode.defaultModel
+        reviewWhenSessionStops = snap.reviewWhenSessionStops ?? false
+        reviewDismissed = snap.reviewDismissed ?? [:]
+        overviewLayout = snap.overviewLayout ?? []
+        codeReviewPrompt = snap.codeReviewPrompt ?? ""
+        sessionRunner = snap.sessionRunner ?? Runners.defaultId
+        sessionAgent = snap.sessionAgent ?? AgentKind.claude.id
+        syncEnabled = snap.syncEnabled ?? false
+        syncPeers = snap.syncPeers ?? []
     }
 
     /// What a data file holds, and why it must not be saved over: it comes from a newer TaskDeck,
@@ -472,6 +499,21 @@ final class AppStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        var snap = makeSnapshot()
+        // What changed since the last save gets the time of this one; what is gone, a deletion.
+        let records = snap.syncRecords()
+        syncMeta = SyncMerge.stamp(syncMeta, before: savedRecords, after: records)
+        savedRecords = records
+        snap.schema = SyncSchema.current
+        snap.sync = syncMeta
+        if let data = try? encoder.encode(snap) {
+            try? data.write(to: Self.dataURL, options: .atomic)
+        }
+        if !applyingSync, changedSinceSync(records) { scheduleSync() }
+    }
+
+    /// Everything that is saved, as it stands now, with the stamps of the last save.
+    func makeSnapshot() -> Snapshot {
         var snap = Snapshot(projects: projects, tasks: tasks, columns: columns, singleTimer: singleTimer,
                             claudeModel: claudeModel, aiInstructions: aiInstructions, autoLogComment: autoLogComment,
                             awaySince: awaySince, agentQueueLimit: agentQueueLimit,
@@ -490,15 +532,11 @@ final class AppStore {
                             overviewLayout: overviewLayout.isEmpty ? nil : overviewLayout,
                             codeReviewPrompt: codeReviewPrompt.isEmpty ? nil : codeReviewPrompt,
                             sessionRunner: sessionRunner, sessionAgent: sessionAgent)
-        // What changed since the last save gets the time of this one; what is gone, a deletion.
-        let records = snap.syncRecords()
-        syncMeta = SyncMerge.stamp(syncMeta, before: savedRecords, after: records)
-        savedRecords = records
+        snap.syncEnabled = syncEnabled ? true : nil
+        snap.syncPeers = syncPeers.isEmpty ? nil : syncPeers
         snap.schema = SyncSchema.current
         snap.sync = syncMeta
-        if let data = try? encoder.encode(snap) {
-            try? data.write(to: Self.dataURL, options: .atomic)
-        }
+        return snap
     }
 
     private static func byUUID<Value>(_ saved: [String: Value]?) -> [UUID: Value] {

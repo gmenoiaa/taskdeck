@@ -26,6 +26,9 @@ struct SettingsView: View {
             AISettings()
                 .tabItem { Label("AI", systemImage: "sparkles") }
                 .tag("ai")
+            SyncSettings()
+                .tabItem { Label("Sync", systemImage: "arrow.triangle.2.circlepath") }
+                .tag("sync")
         }
     }
 }

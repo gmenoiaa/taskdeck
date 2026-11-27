@@ -160,11 +160,21 @@ struct ClaudeCodeRunner: SessionRunner {
         return prefix + short + "@" + home
     }
 
-    private static func parse(_ worktreeId: String) -> (short: String, home: String)? {
+    /// The short id and Claude home in a worktree id. Nil unless the short id is what Claude Code
+    /// prints (hex): it ends up in a shell line, and nothing else may get that far.
+    static func parse(_ worktreeId: String) -> (short: String, home: String)? {
         guard worktreeId.hasPrefix(prefix) else { return nil }
         let rest = worktreeId.dropFirst(prefix.count)
-        guard let at = rest.firstIndex(of: "@") else { return (String(rest), "") }
-        return (String(rest[..<at]), String(rest[rest.index(after: at)...]))
+        let short: Substring, home: Substring
+        if let at = rest.firstIndex(of: "@") {
+            short = rest[..<at]
+            home = rest[rest.index(after: at)...]
+        } else {
+            short = rest
+            home = ""
+        }
+        guard !short.isEmpty, short.count <= 64, short.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+        return (String(short), String(home))
     }
 
     func canRemove(worktreeId: String) -> Bool { Self.parse(worktreeId) != nil }
@@ -227,7 +237,7 @@ struct ClaudeCodeRunner: SessionRunner {
               let claude = ClaudeCode.executable else { return }
         var lines = ["#!/bin/zsh -l"]
         if !home.isEmpty { lines.append("export CLAUDE_CONFIG_DIR=\(Sessions.shellQuoted(home))") }
-        lines.append("exec \(Sessions.shellQuoted(claude)) attach \(short)")
+        lines.append("exec \(Sessions.shellQuoted(claude)) attach \(Sessions.shellQuoted(short))")
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("taskdeck-attach-\(short).command")
         do {
             try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
