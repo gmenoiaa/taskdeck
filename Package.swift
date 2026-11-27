@@ -5,6 +5,7 @@ let package = Package(
     name: "TaskDeck",
     platforms: [.macOS(.v14)],
     targets: [
-        .executableTarget(name: "TaskDeck", path: "Sources/TaskDeck")
+        .executableTarget(name: "TaskDeck", path: "Sources/TaskDeck"),
+        .testTarget(name: "TaskDeckTests", dependencies: ["TaskDeck"], path: "Tests/TaskDeckTests"),
     ]
 )

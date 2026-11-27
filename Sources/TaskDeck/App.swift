@@ -3,7 +3,13 @@ import AppKit
 
 @main
 struct TaskDeckApp: App {
-    @State private var store = AppStore()
+    @State private var store: AppStore
+
+    init() {
+        // Before the store: a command run from the terminal must not load or touch the user's data.
+        if let status = MergeCommand.runIfAsked(CommandLine.arguments) { exit(status) }
+        _store = State(initialValue: AppStore())
+    }
 
     var body: some Scene {
         Window("TaskDeck", id: "main") {
