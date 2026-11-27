@@ -113,7 +113,7 @@ struct ReviewSection: View {
     private func action(_ item: ReviewItem, task: TaskItem, space: Project?) -> some View {
         let session = store.headlineSession(of: task)
         let live = session.flatMap { store.status(of: $0) }.map { $0.kind != .gone } ?? false
-        let pr = store.sessions(of: task).compactMap { store.status(of: $0)?.prURL }.last
+        let pr = store.latestPullRequest(of: task)?.url ?? store.sessions(of: task).compactMap { store.status(of: $0)?.prURL }.last
         Group {
             switch item.action {
             case "open_pr":

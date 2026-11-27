@@ -190,7 +190,8 @@ private struct NotificationSettingsTab: View {
             Section("Tickets and agents") {
                 Toggle("Ticket assigned to me", isOn: $store.notify.assigned)
                     .help("Checked every 15 minutes while the app is open. Tickets you ignored are not reported.")
-                Toggle("Pull request reviewed, commented on, merged or closed", isOn: $store.notify.pullRequests)
+                Toggle("Pull request reviewed, commented on, merged or closed, or its checks fail", isOn: $store.notify.pullRequests)
+                    .help("For every pull request on a task's list, read from GitHub every five minutes while it is open. Also when it gets a merge conflict. Comments by bots and your own are not reported.")
                 Toggle("Agent sessions", isOn: $store.notify.sessions)
                     .help("When an agent stops and it is your turn, when it opens a pull request, and when the agent queue cannot start a task or needs you to pick a repository.")
                 Text("Tickets are checked every 15 minutes while the app is open. Agent sessions: when it is your turn, a pull request opens, or the queue needs you.")
@@ -230,8 +231,8 @@ private struct NotificationSettingsTab: View {
                 }
                 if store.notify.badge == .waiting {
                     Toggle("Count tickets assigned to me that are not on the board", isOn: $store.notify.badgeAssigned)
-                    Toggle("Count open pull requests", isOn: $store.notify.badgePullRequests)
-                    Text("Always counted: sessions where it is your turn, task reminders that came due, and queued tasks that need a repository or did not start. Pull requests are the board's sessions', without drafts.")
+                    Toggle("Count pull requests that need a look", isOn: $store.notify.badgePullRequests)
+                    Text("Always counted: sessions where it is your turn, task reminders that came due, and queued tasks that need a repository or did not start. A pull request needs a look while it is open with a review or comment you have not answered, failed checks or a merge conflict.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

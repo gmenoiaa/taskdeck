@@ -45,6 +45,10 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
   must be added to both `load()` and `save()`.
 - The user sees "spaces"; in code and in `data.json` a space is still a `Project` (`projects`,
   `projectId`). Keep the old names in code so existing files load, and write "space" in UI text.
+- A task's pull requests are saved on it (`TaskItem.pullRequests`). `recordPullRequests` adds what
+  Orca and the branch lookup report and never removes one; `refreshPullRequestStatuses` reads each
+  from GitHub through `gh`. Cards, the detail tab, the bell and the notifications read that saved
+  list, not `Orca.Status`, which knows one pull request per worktree and only while Orca answers.
 - Secrets go in the Keychain (service `local.taskdeck`), never in `data.json` or the repository.
 - macOS 26 Liquid Glass (`GlassEffectContainer`, `.buttonStyle(.glass)`, `.glassEffect`,
   `ToolbarSpacer`) is always behind `if #available(macOS 26, *)` with a pre-26 fallback. Shared

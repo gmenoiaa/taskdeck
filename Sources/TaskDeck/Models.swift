@@ -295,6 +295,13 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var explanation: String?
     /// Agent sessions started in Orca for this task, oldest first. Optional so older files still load.
     var sessions: [AgentSession]?
+    /// Every pull request seen for this task, in the order found. Optional so older files still
+    /// load; use `pullRequestList`.
+    var pullRequests: [TaskPullRequest]?
+    /// The task's pull requests, newest first, without the ones taken off the list by hand.
+    var pullRequestList: [TaskPullRequest] {
+        (pullRequests ?? []).filter { $0.hidden != true }.sorted { $0.openedAt > $1.openedAt }
+    }
     /// The Orca repository chosen for this task when the queue could not tell which one it is about.
     var queueRepoId: String?
     /// Why the agent queue is not starting this task: `needsRepository`, or the error it met.
@@ -557,5 +564,73 @@ enum Fmt {
 
     static func hours(_ seconds: TimeInterval) -> String {
         String(format: "%.2f", seconds / 3600)
+    }
+}
+
+/// A pull request that belongs to a task. Found through an agent session's worktree or added by
+/// its link, and kept after the worktree is gone. What GitHub last said about it is saved with
+/// it, so the list has something to show before GitHub answers again. Every field added later
+/// must be optional so saved files still load.
+struct TaskPullRequest: Identifiable, Codable, Hashable {
+    /// "owner/name" on github.com.
+    var slug: String
+    var number: Int
+    /// The Orca worktree it was found in; nil for one added by its link.
+    var worktreeId: String?
+    /// The `gh` account of the session it was found in; nil for the space's.
+    var account: String?
+    var firstSeen = Date()
+    /// Taken off the list by hand. Kept, so the next look at Orca does not add it again.
+    var hidden: Bool?
+
+    // What GitHub said at `checkedAt`; nil until it answered.
+    var title: String?
+    /// "open", "merged" or "closed". Orca's word for it until GitHub answers.
+    var state: String?
+    var draft: Bool?
+    var createdAt: Date?
+    var mergedAt: Date?
+    var closedAt: Date?
+    var approved: Bool?
+    var changesRequested: Bool?
+    /// Reviews and comments by other people since my last push or reply.
+    var waiting: Int?
+    /// "passing", "failing" or "pending"; nil when the last commit has no checks.
+    var checks: String?
+    var conflict: Bool?
+    /// The last commit, to say "checks failed" once per push.
+    var headSha: String?
+    var checkedAt: Date?
+
+    /// When the newest review or comment already announced was written.
+    var feedbackSeenAt: Date?
+    /// What was already announced besides reviews and comments: "merged", "closed", "checks:<sha>", "conflict:<sha>".
+    var announced: [String]?
+
+    var id: String { "\(slug.lowercased())#\(number)" }
+    var url: URL? { URL(string: "https://github.com/\(slug)/pull/\(number)") }
+    var openedAt: Date { createdAt ?? firstSeen }
+    var isOpen: Bool { state == "open" }
+
+    /// Why an open pull request needs a look, in a few words; nil when nothing waits for me.
+    var attention: String? {
+        guard isOpen else { return nil }
+        var reasons: [String] = []
+        if let waiting, waiting > 0 {
+            reasons.append(changesRequested == true ? "changes requested"
+                           : waiting == 1 ? "1 review or comment to answer" : "\(waiting) reviews or comments to answer")
+        }
+        if checks == "failing" { reasons.append("checks failed") }
+        if conflict == true { reasons.append("merge conflict") }
+        return reasons.isEmpty ? nil : reasons.joined(separator: ", ")
+    }
+
+    /// "PR #12", "Draft PR #12", "Merged #12", "Closed #12".
+    var label: String {
+        switch state {
+        case "merged": return "Merged #\(number)"
+        case "closed": return "Closed #\(number)"
+        default: return (draft == true ? "Draft " : "") + "PR #\(number)"
+        }
     }
 }

@@ -149,7 +149,7 @@ struct MenuTaskRow: View {
             Spacer(minLength: 4)
             if let session = store.headlineSession(of: task) {
                 SessionBadges(session: session, status: store.status(of: session), space: project,
-                              count: store.sessions(of: task).count, compact: true)
+                              count: store.sessions(of: task).count, pullRequest: store.latestPullRequest(of: task), compact: true)
             }
             Text(running ? Fmt.clock(task.currentStretch(now: store.now)) : Fmt.short(task.total(now: Date())))
                 .font(.callout).monospacedDigit()

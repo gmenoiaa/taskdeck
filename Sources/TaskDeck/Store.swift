@@ -34,12 +34,9 @@ final class AppStore {
     @ObservationIgnored var knownAssigned: Set<String>?
     /// Waiting items the user cleared from the bell's list, by `WaitingItem.id`.
     var clearedWaiting: Set<String> = []
-    /// Pull requests whose end (merged or closed) was already reported, as "worktree|kind". Saved:
-    /// after a launch the app learns again that an old one is merged, and that is not news.
-    var announcedPullRequests: Set<String> = []
-    /// For each open pull request's page, when its newest review or comment was written, as of the
-    /// last announcement. Saved, so a launch does not announce old feedback again. A pull request
-    /// first seen with feedback on it takes note of it without a banner.
+    /// Where reviews and comments were announced up to, by pull request page, from before each
+    /// task kept its own list. Only read now: an entry moves to its `TaskPullRequest` when that
+    /// is first recorded, so feedback announced by an older version is not announced again.
     var pullRequestFeedbackSeen: [String: Date] = [:]
     /// What each space's tracker lists as assigned to me, as of the last look (kept in `assigned.json`).
     var assignedTickets: [UUID: [RemoteTicket]] = [:]
@@ -111,17 +108,20 @@ final class AppStore {
     var linkedSessions: [UUID: [AgentSession]] = [:]
     /// Worktree ids being removed in Orca right now, so the views can show it is under way.
     var removingWorktrees: Set<String> = []
-    /// Pull requests found by asking GitHub directly, by worktree id, for when Orca reports none.
-    @ObservationIgnored private var pullRequests: [String: Orca.PullRequest] = [:]
+    /// Pull requests found by asking GitHub about a worktree's branch, by worktree id, for when
+    /// Orca reports none.
+    @ObservationIgnored private var pullRequests: [String: [Orca.PullRequest]] = [:]
     /// What each stopped session's transcript ends on, by worktree id. Read again on every refresh.
     @ObservationIgnored private var transcripts: [String: SessionTranscript.Last] = [:]
-    /// Title, draft flag and dates of the agent sessions' pull requests, by their page. Read for
-    /// a standup only; a merged or closed one is not asked about again.
+    /// Title, description and dates of the tasks' pull requests, by their page, as read from
+    /// GitHub since launch. The description is not saved, so a standup asks again for recent ones.
     @ObservationIgnored private var pullRequestDetails: [URL: Orca.PullRequestDetail] = [:]
     @ObservationIgnored private var pullRequestAsked: [String: Date] = [:]
-    /// Reviews and comments on the sessions' open pull requests, by the pull request's page.
+    /// Reviews and comments on the tasks' pull requests, by the pull request's page.
     @ObservationIgnored private var pullRequestFeedback: [URL: Orca.PullRequestFeedback] = [:]
-    @ObservationIgnored private var feedbackAsked: [URL: Date] = [:]
+    /// When GitHub was last asked about each pull request, by `TaskPullRequest.id`, since launch.
+    @ObservationIgnored private var pullRequestPolled: [String: Date] = [:]
+    @ObservationIgnored private var pollingPullRequests = false
     /// The developer's own GitHub logins, read from gh at most every hour.
     @ObservationIgnored private var githubLogins: (logins: Set<String>, at: Date)?
     @ObservationIgnored private var orcaRepos: [Orca.Repo] = []
@@ -151,7 +151,6 @@ final class AppStore {
         var notify: NotificationSettings?
         var knownAssigned: [String]?
         var clearedWaiting: [String]?
-        var announcedPullRequests: [String]?
         var pullRequestFeedbackSeen: [String: Date]?
         var ignoredAssigned: [String]?
         var unloggedRemindedAt: Date?
@@ -216,6 +215,9 @@ final class AppStore {
                 // In the background only what someone is waiting to hear about is worth asking Orca for.
                 if NSApplication.shared.isActive || (self?.watchesSessionsInBackground == true && round % 3 == 0) {
                     await self?.refreshSessionStatuses()
+                    // After Orca, which may have just reported a new one; and also when Orca is
+                    // closed, since the pull requests are saved with their tasks.
+                    await self?.refreshPullRequestStatuses()
                     self?.noticeSessionChanges()
                     await self?.runAgentQueue()
                 }
@@ -385,7 +387,6 @@ final class AppStore {
             notify = snap.notify ?? NotificationSettings()
             knownAssigned = snap.knownAssigned.map(Set.init)
             clearedWaiting = Set(snap.clearedWaiting ?? [])
-            announcedPullRequests = Set(snap.announcedPullRequests ?? [])
             pullRequestFeedbackSeen = snap.pullRequestFeedbackSeen ?? [:]
             ignoredAssigned = Set(snap.ignoredAssigned ?? [])
             unloggedRemindedAt = snap.unloggedRemindedAt
@@ -420,7 +421,6 @@ final class AppStore {
                             agentQueueAskClaude: agentQueueAskClaude, notify: notify,
                             knownAssigned: knownAssigned.map { $0.sorted() },
                             clearedWaiting: clearedWaiting.isEmpty ? nil : clearedWaiting.sorted(),
-                            announcedPullRequests: announcedPullRequests.isEmpty ? nil : announcedPullRequests.sorted(),
                             pullRequestFeedbackSeen: pullRequestFeedbackSeen.isEmpty ? nil : pullRequestFeedbackSeen,
                             ignoredAssigned: ignoredAssigned.isEmpty ? nil : ignoredAssigned.sorted(), unloggedRemindedAt: unloggedRemindedAt,
                             goals: goals.isEmpty ? nil : goals,
@@ -877,6 +877,12 @@ final class AppStore {
     /// `force` is the refresh button: it also asks GitHub again about every session without waiting
     /// out the five minutes, and reads Orca's repositories again.
     func refreshSessionStatuses(force: Bool = false) async {
+        await refreshSessions(force: force)
+        // Otherwise the session loop asks GitHub, a few pull requests at a time.
+        if force { await refreshPullRequestStatuses(force: true) }
+    }
+
+    private func refreshSessions(force: Bool) async {
         guard Orca.isInstalled else { return }
         if force {
             // A background refresh may be half-way; let it finish (a few seconds at most) and then run this one.
@@ -904,49 +910,192 @@ final class AppStore {
         await readTranscripts(trees)
         publish(trees)
         if await askGitHub(trees, limit: force ? 40 : 3) { publish(trees) }
-        await askPullRequestFeedback(limit: force ? 40 : 3)
+        recordPullRequests(trees)
     }
 
-    /// Reads reviews and comments on the sessions' open pull requests, a few per refresh and each
-    /// at most every five minutes, and announces what is new.
-    private func askPullRequestFeedback(limit: Int) async {
-        var open: [(url: URL, task: TaskItem, account: String?)] = []
-        for task in tasks where !task.archived {
-            for session in sessions(of: task) {
-                guard let status = status(of: session), status.kind == .prOpen, let url = status.prURL,
-                      !open.contains(where: { $0.url == url }) else { continue }
-                open.append((url, task, session.githubAccount ?? project(task.projectId)?.githubAccount))
-            }
-        }
-        // Pull requests that are no longer open are forgotten, so the saved list does not grow.
-        let pages = Set(open.map(\.url.absoluteString))
+    /// Adds the pull requests Orca and the branch lookups report to their tasks' lists. Nothing is
+    /// taken off here: a pull request stays after its branch gets another one or its worktree goes.
+    private func recordPullRequests(_ trees: [Orca.Worktree]) {
+        guard let statuses = sessionStatuses else { return }
+        let byId = Dictionary(trees.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let slugs = Dictionary(orcaRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
+                               uniquingKeysWith: { first, _ in first })
         var changed = false
-        if sessionStatuses != nil, pullRequestFeedbackSeen.keys.contains(where: { !pages.contains($0) }) {
-            pullRequestFeedbackSeen = pullRequestFeedbackSeen.filter { pages.contains($0.key) }
-            changed = true
-        }
-        let due = open.filter { feedbackAsked[$0.url].map { Date().timeIntervalSince($0) >= 300 } ?? true }
-        if !due.isEmpty, Date().timeIntervalSince(githubLogins?.at ?? .distantPast) > 3600 {
-            githubLogins = (await Orca.githubLogins(), Date())
-        }
-        for item in due.prefix(limit) {
-            feedbackAsked[item.url] = Date()
-            // A failed question keeps what was known.
-            guard let feedback = await Orca.pullRequestFeedback(item.url, account: item.account,
-                                                                mine: githubLogins?.logins ?? []) else { continue }
-            pullRequestFeedback[item.url] = feedback
-            let key = item.url.absoluteString
-            if let seen = pullRequestFeedbackSeen[key] {
-                let fresh = feedback.items.filter { $0.at > seen }
-                guard let newest = fresh.last else { continue }
-                announceFeedback(fresh, on: feedback, task: item.task, page: item.url)
-                pullRequestFeedbackSeen[key] = newest.at
-            } else {
-                pullRequestFeedbackSeen[key] = feedback.items.last?.at ?? .distantPast
+        for i in tasks.indices where !tasks[i].archived {
+            for session in sessions(of: tasks[i]) {
+                guard let id = session.worktreeId, let tree = byId[id], let slug = slugs[tree.repoId] else { continue }
+                // Orca's own first, then everything GitHub lists for the branch. The state is
+                // nil while Orca's status is about the agent, which hides the pull request's.
+                var found: [(number: Int, state: String?, draft: Bool)] = []
+                if let status = tree.status.prNumber == nil ? nil : statuses[id], let number = status.prNumber {
+                    let state: String?
+                    switch status.kind {
+                    case .prOpen: state = "open"
+                    case .prMerged: state = "merged"
+                    case .prClosed: state = "closed"
+                    default: state = nil
+                    }
+                    found.append((number, state, status.prDraft))
+                }
+                for pr in pullRequests[id] ?? [] where !found.contains(where: { $0.number == pr.number }) {
+                    found.append((pr.number, pr.state, pr.draft))
+                }
+                for item in found {
+                    var entry = TaskPullRequest(slug: slug, number: item.number, worktreeId: id, account: session.githubAccount)
+                    if let j = tasks[i].pullRequests?.firstIndex(where: { $0.id == entry.id }) {
+                        guard let state = item.state, let known = tasks[i].pullRequests?[j], known.state != state else { continue }
+                        if known.checkedAt == nil {
+                            // GitHub has not answered yet: Orca's word is all there is.
+                            tasks[i].pullRequests?[j].state = state
+                            tasks[i].pullRequests?[j].draft = item.draft
+                            changed = true
+                        } else if Date().timeIntervalSince(pullRequestPolled[known.id] ?? .distantPast) > 60 {
+                            // Orca saw it change first: GitHub is asked on the next round, not in five minutes.
+                            pullRequestPolled[known.id] = nil
+                        }
+                        continue
+                    }
+                    entry.state = item.state
+                    entry.draft = item.state == nil ? nil : item.draft
+                    if let page = entry.url?.absoluteString { entry.feedbackSeenAt = pullRequestFeedbackSeen.removeValue(forKey: page) }
+                    tasks[i].pullRequests = (tasks[i].pullRequests ?? []) + [entry]
+                    changed = true
+                }
             }
-            changed = true
         }
         if changed { save() }
+    }
+
+    // MARK: Pull requests on GitHub
+
+    /// One pull request to ask GitHub about.
+    private struct PullRequestQuestion {
+        let id: String
+        let slug: String
+        let number: Int
+        let account: String?
+    }
+
+    private func question(_ pr: TaskPullRequest, of task: TaskItem) -> PullRequestQuestion {
+        PullRequestQuestion(id: pr.id, slug: pr.slug, number: pr.number,
+                            account: pr.account ?? project(task.projectId)?.githubAccount)
+    }
+
+    /// Asks GitHub about the pull requests of the tasks on the board, from the saved lists: Orca
+    /// need not be running, and a pull request whose worktree is gone is still watched. An open
+    /// one at most every five minutes and a few per call; a merged one never again; one closed
+    /// without merging once a day, since it can be reopened. `force` is the refresh button: every
+    /// one that is not merged, now.
+    func refreshPullRequestStatuses(force: Bool = false) async {
+        if force { pullRequestPolled.removeAll() }
+        let now = Date()
+        var due: [PullRequestQuestion] = []
+        for task in tasks where !task.archived {
+            for pr in task.pullRequests ?? [] where pr.hidden != true && !due.contains(where: { $0.id == pr.id }) {
+                if let checked = pr.checkedAt {
+                    if pr.state == "merged" { continue }
+                    if pr.state == "closed", !force, now.timeIntervalSince(checked) < 86400 { continue }
+                }
+                if let asked = pullRequestPolled[pr.id], now.timeIntervalSince(asked) < 300 { continue }
+                due.append(question(pr, of: task))
+            }
+        }
+        await askGitHub(about: Array(due.prefix(force ? 40 : 5)))
+    }
+
+    /// Reads the pull requests from GitHub, a few at a time, and keeps and announces what they say.
+    private func askGitHub(about due: [PullRequestQuestion]) async {
+        guard !due.isEmpty else { return }
+        // One at a time; a round under way is over in a few seconds.
+        for _ in 0..<100 where pollingPullRequests { try? await Task.sleep(for: .milliseconds(100)) }
+        guard !pollingPullRequests else { return }
+        pollingPullRequests = true
+        defer { pollingPullRequests = false }
+        if Date().timeIntervalSince(githubLogins?.at ?? .distantPast) > 3600 {
+            githubLogins = (await Orca.githubLogins(), Date())
+        }
+        let mine = githubLogins?.logins ?? []
+        for item in due { pullRequestPolled[item.id] = Date() }
+        var changed = false
+        await withTaskGroup(of: (String, Orca.PullRequestReport?).self) { group in
+            var next = 0
+            func add() {
+                guard next < due.count else { return }
+                let item = due[next]
+                next += 1
+                group.addTask {
+                    (item.id, await Orca.pullRequestReport(slug: item.slug, number: item.number, account: item.account, mine: mine))
+                }
+            }
+            for _ in 0..<Self.spaceRefreshWidth { add() }
+            for await (id, report) in group {
+                // A failed question keeps what was known.
+                if let report, received(report, for: id) { changed = true }
+                add()
+            }
+        }
+        if changed { save() }
+    }
+
+    /// Keeps GitHub's answer on every task that lists the pull request, and announces what is new
+    /// in it once. Returns whether any task lists it.
+    private func received(_ report: Orca.PullRequestReport, for id: String) -> Bool {
+        var said = false
+        for i in tasks.indices {
+            guard let j = tasks[i].pullRequests?.firstIndex(where: { $0.id == id }),
+                  let old = tasks[i].pullRequests?[j] else { continue }
+            var pr = old
+            pr.title = report.detail.title
+            pr.state = report.detail.state
+            pr.draft = report.detail.draft
+            pr.createdAt = report.detail.createdAt
+            pr.mergedAt = report.detail.mergedAt
+            pr.closedAt = report.detail.closedAt
+            pr.approved = report.feedback.approved
+            pr.changesRequested = report.feedback.changesRequested
+            pr.waiting = report.feedback.waiting.count
+            pr.checks = report.checks
+            pr.conflict = report.conflict
+            pr.headSha = report.headSha
+            pr.checkedAt = Date()
+            if let page = pr.url {
+                pullRequestFeedback[page] = report.feedback
+                pullRequestDetails[page] = report.detail
+            }
+            noticePullRequest(report, old: old, new: &pr, task: tasks[i], announce: !said && !tasks[i].archived)
+            said = true
+            tasks[i].pullRequests?[j] = pr
+        }
+        return said
+    }
+
+    /// The pull request a card shows: the newest one.
+    func latestPullRequest(of task: TaskItem) -> TaskPullRequest? { task.pullRequestList.first }
+
+    /// Adds a pull request to a task by its address on GitHub, and asks GitHub about it. False
+    /// when the text is not a pull request's address.
+    @discardableResult
+    func addPullRequest(link: String, to taskId: UUID) -> Bool {
+        guard let parsed = CodeReview.pullRequest(link), let i = tasks.firstIndex(where: { $0.id == taskId }) else { return false }
+        let entry = TaskPullRequest(slug: parsed.slug, number: parsed.number)
+        if let j = tasks[i].pullRequests?.firstIndex(where: { $0.id == entry.id }) {
+            tasks[i].pullRequests?[j].hidden = nil
+        } else {
+            tasks[i].pullRequests = (tasks[i].pullRequests ?? []) + [entry]
+        }
+        save()
+        let ask = question(entry, of: tasks[i])
+        Task { await askGitHub(about: [ask]) }
+        return true
+    }
+
+    /// Takes a pull request off a task's list. It is kept, hidden, so that Orca reporting it
+    /// again does not bring it back.
+    func forgetPullRequest(_ id: String, from taskId: UUID) {
+        guard let i = tasks.firstIndex(where: { $0.id == taskId }),
+              let j = tasks[i].pullRequests?.firstIndex(where: { $0.id == id }) else { return }
+        tasks[i].pullRequests?[j].hidden = true
+        save()
     }
 
     /// Reviews and comments on a session's open pull request, as last read from GitHub.
@@ -1011,8 +1160,9 @@ final class AppStore {
                 if status.kind == .yourTurn { status.ask = last.ask }
                 status.running = last.running
             }
-            if status.prNumber == nil, let pr = pullRequests[tree.id] {
+            if status.prNumber == nil, let pr = Orca.current(pullRequests[tree.id] ?? []) {
                 status.prNumber = pr.number
+                status.prDraft = pr.draft && pr.state == "open"
                 if status.kind == .idle {
                     status.kind = pr.state == "open" ? .prOpen : pr.state == "merged" ? .prMerged : .prClosed
                 }
@@ -1025,8 +1175,9 @@ final class AppStore {
         if sessionStatuses != fresh { sessionStatuses = fresh }
     }
 
-    /// Asks GitHub about sessions for which Orca reports no pull request, as the space's GitHub account.
-    /// A few per background refresh and each at most every five minutes. Returns whether anything changed.
+    /// Asks GitHub for the pull requests of the sessions' branches, as the space's GitHub account:
+    /// Orca reports one per worktree at most, and for some none. A few per background refresh;
+    /// each at most every five minutes while it has none or an open one, otherwise every hour. Returns whether anything changed.
     private func askGitHub(_ trees: [Orca.Worktree], limit: Int) async -> Bool {
         let byId = Dictionary(trees.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let slugs = Dictionary(orcaRepos.compactMap { repo in repo.slug.map { (repo.id, $0) } },
@@ -1035,11 +1186,12 @@ final class AppStore {
         for task in tasks where !task.archived {
             for session in sessions(of: task) {
                 guard let id = session.worktreeId, let tree = byId[id], !tree.branch.isEmpty,
-                      tree.status.prNumber == nil, tree.status.kind != .working,
-                      let slug = slugs[tree.repoId] else { continue }
-                // A merged or closed pull request does not change again.
-                if let pr = pullRequests[id], pr.state != "open" { continue }
-                if let asked = pullRequestAsked[id], Date().timeIntervalSince(asked) < 300 { continue }
+                      tree.status.kind != .working, let slug = slugs[tree.repoId] else { continue }
+                // Where Orca reports one, or the one found has ended, the answer is only wanted
+                // for the task's list: the branch's earlier pull requests, or a new one after a merge.
+                let ended = Orca.current(pullRequests[id] ?? []).map { $0.state != "open" } ?? false
+                let rarely = ended || tree.status.prNumber != nil
+                if let asked = pullRequestAsked[id], Date().timeIntervalSince(asked) < (rarely ? 3600 : 300) { continue }
                 if due.contains(where: { $0.tree.id == id }) { continue }
                 due.append((tree, slug, session.githubAccount ?? project(task.projectId)?.githubAccount))
             }
@@ -1048,8 +1200,8 @@ final class AppStore {
         for item in due.prefix(limit) {
             pullRequestAsked[item.tree.id] = Date()
             // A failed question keeps what was known; only a real answer replaces it.
-            guard let answer = await Orca.pullRequest(slug: item.slug, branch: item.tree.branch, account: item.account) else { continue }
-            if pullRequests[item.tree.id] != answer {
+            guard let answer = await Orca.pullRequests(slug: item.slug, branch: item.tree.branch, account: item.account) else { continue }
+            if pullRequests[item.tree.id] ?? [] != answer || pullRequests[item.tree.id] == nil {
                 pullRequests[item.tree.id] = answer
                 changed = true
             }
@@ -1233,36 +1385,33 @@ final class AppStore {
         return (failed, targets.count)
     }
 
-    /// The pull request of an agent session, as last read from GitHub for a standup.
+    /// The pull request of an agent session, as last read from GitHub.
     func pullRequest(of session: AgentSession) -> Orca.PullRequestDetail? {
-        status(of: session)?.prURL.flatMap { pullRequestDetails[$0] }
+        guard let page = status(of: session)?.prURL else { return nil }
+        if let read = pullRequestDetails[page] { return read }
+        // Not read since launch: what was saved says the same, less the description.
+        guard let saved = tasks.lazy.compactMap({ $0.pullRequests?.first { $0.url == page && $0.checkedAt != nil } }).first,
+              let state = saved.state else { return nil }
+        return Orca.PullRequestDetail(number: saved.number, title: saved.title ?? "", body: "", state: state,
+                                      draft: saved.draft ?? false, createdAt: saved.createdAt,
+                                      mergedAt: saved.mergedAt, closedAt: saved.closedAt)
     }
 
-    /// Reads the pull requests of a space's agent sessions from GitHub, a few at a time.
+    /// Reads a space's pull requests from GitHub for a standup: the open ones, and the ones that
+    /// ended lately and were not read since launch, for their descriptions.
     func refreshPullRequests(space: Project) async {
-        var due: [(url: URL, account: String?)] = []
+        let now = Date()
+        var due: [PullRequestQuestion] = []
         for task in tasks where task.projectId == space.id {
-            for session in sessions(of: task) {
-                guard let url = status(of: session)?.prURL, !due.contains(where: { $0.url == url }) else { continue }
-                if let known = pullRequestDetails[url], known.state != "open" { continue }
-                due.append((url, session.githubAccount ?? space.githubAccount))
+            for pr in task.pullRequests ?? [] where pr.hidden != true && !due.contains(where: { $0.id == pr.id }) {
+                if let page = pr.url, let known = pullRequestDetails[page], known.state != "open" { continue }
+                // An end long before any standup's period: the saved dates say all there is to say.
+                if pr.checkedAt != nil, !pr.isOpen, now.timeIntervalSince(pr.mergedAt ?? pr.closedAt ?? .distantPast) > 14 * 86400 { continue }
+                if let asked = pullRequestPolled[pr.id], now.timeIntervalSince(asked) < 60 { continue }
+                due.append(question(pr, of: task))
             }
         }
-        await withTaskGroup(of: (URL, Orca.PullRequestDetail?).self) { group in
-            var next = 0
-            func add() {
-                guard next < due.count else { return }
-                let item = due[next]
-                next += 1
-                group.addTask { (item.url, await Orca.pullRequestDetail(item.url, account: item.account)) }
-            }
-            for _ in 0..<Self.spaceRefreshWidth { add() }
-            for await (url, detail) in group {
-                // A failed question keeps what was known.
-                if let detail { pullRequestDetails[url] = detail }
-                add()
-            }
-        }
+        await askGitHub(about: due)
     }
 
     /// Redmine tasks with tracked time that was not sent yet, most pending time first.
