@@ -257,6 +257,11 @@ struct TimeEntry: Identifiable, Codable, Hashable {
     var start: Date
     var end: Date?
     var loggedAt: Date?
+    /// `Machine.id` of the Mac that started it, for a running entry; nil in entries from before
+    /// there was more than one Mac, which are this Mac's. Only that Mac stops it by itself.
+    var machine: String?
+
+    var isLocal: Bool { machine == nil || machine == Machine.id }
 
     func duration(now: Date) -> TimeInterval {
         max(0, (end ?? now).timeIntervalSince(start))

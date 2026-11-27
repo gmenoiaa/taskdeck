@@ -146,7 +146,8 @@ final class AppStore {
     }
     @ObservationIgnored private var askingAboutAway = false
 
-    private struct Snapshot: Codable {
+    /// What `data.json` holds. Internal, not private: `SyncRecords.swift` reads and rebuilds it.
+    struct Snapshot: Codable {
         var projects: [Project]
         var tasks: [TaskItem]
         var columns: [BoardColumn]?
@@ -177,7 +178,18 @@ final class AppStore {
         var codeReviewPrompt: String?
         var sessionRunner: String?
         var sessionAgent: String?
+        /// The data version that wrote the file (`SyncSchema`); nil in files from before it existed, which are version 1.
+        var schema: Int?
+        /// When each synced record last changed or was deleted.
+        var sync: SyncMeta?
     }
+
+    /// Stamps of the synced records, and the records as last saved, to see what a save changes.
+    @ObservationIgnored private var syncMeta = SyncMeta()
+    @ObservationIgnored private var savedRecords: [String: Data] = [:]
+    /// Why this run must not write `data.json`: it was written by a newer TaskDeck, whose fields
+    /// this one would drop, or it could not be read and writing would replace it with almost nothing.
+    @ObservationIgnored private(set) var saveBlocked: String?
 
     static var dataURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -188,6 +200,16 @@ final class AppStore {
 
     init() {
         load()
+        if let saveBlocked {
+            // After launch, so the alert has the app to sit on.
+            Task { @MainActor in
+                let alert = NSAlert()
+                alert.messageText = "TaskDeck is not saving changes"
+                alert.informativeText = saveBlocked
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+        }
         // Said outright: whether `didSet` runs for values set during init is easy to get wrong.
         Notifier.sound = notify.sound
         Notifier.channelSettings = notify.channels
@@ -370,11 +392,13 @@ final class AppStore {
     private func cutAway(at since: Date, resumeAt back: Date?) {
         for i in tasks.indices {
             var cut = false
-            for j in tasks[i].entries.indices where tasks[i].entries[j].end == nil && tasks[i].entries[j].start < since {
+            // Only this Mac's timers: being away from this Mac says nothing about another one.
+            for j in tasks[i].entries.indices where tasks[i].entries[j].end == nil && tasks[i].entries[j].isLocal
+                && tasks[i].entries[j].start < since {
                 tasks[i].entries[j].end = since
                 cut = true
             }
-            if cut, let back { tasks[i].entries.append(TimeEntry(start: back)) }
+            if cut, let back { tasks[i].entries.append(TimeEntry(start: back, machine: Machine.id)) }
         }
     }
 
@@ -383,8 +407,12 @@ final class AppStore {
     private func load() {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        if let data = try? Data(contentsOf: Self.dataURL),
-           let snap = try? decoder.decode(Snapshot.self, from: data) {
+        let data = try? Data(contentsOf: Self.dataURL)
+        let (read, blocked) = Self.read(data, decoder: decoder)
+        saveBlocked = blocked
+        if let snap = read {
+            syncMeta = snap.sync ?? SyncMeta()
+            savedRecords = snap.syncRecords()
             projects = snap.projects
             tasks = snap.tasks
             if let saved = snap.columns, !saved.isEmpty { columns = saved }
@@ -415,7 +443,7 @@ final class AppStore {
             codeReviewPrompt = snap.codeReviewPrompt ?? ""
             sessionRunner = snap.sessionRunner ?? Runners.defaultId
             sessionAgent = snap.sessionAgent ?? AgentKind.claude.id
-        } else if !FileManager.default.fileExists(atPath: Self.dataURL.path) {
+        } else if data == nil, !FileManager.default.fileExists(atPath: Self.dataURL.path) {
             projects = [
                 Project(name: "Onerhino", kind: .redmine, colorIndex: 6),
                 Project(name: "Aries/Slate", kind: .jira, colorIndex: 0),
@@ -425,11 +453,26 @@ final class AppStore {
         }
     }
 
+    /// What a data file holds, and why it must not be saved over: it comes from a newer TaskDeck,
+    /// whose fields this one would drop, or it cannot be read, and saving would replace it with
+    /// almost nothing. No file at all is neither: a first launch.
+    static func read(_ data: Data?, decoder: JSONDecoder) -> (snapshot: Snapshot?, blocked: String?) {
+        guard let data else { return (nil, nil) }
+        guard let snap = try? decoder.decode(Snapshot.self, from: data) else {
+            return (nil, "Your data file could not be read, so TaskDeck saves no changes rather than replace it. It is at \(dataURL.path).")
+        }
+        if (snap.schema ?? 1) > SyncSchema.current {
+            return (snap, "Your data was saved by a newer version of TaskDeck (data version \(snap.schema ?? 1); this one knows \(SyncSchema.current)). This version shows it but saves no changes, so it cannot drop what it does not know. Install the newer version.")
+        }
+        return (snap, nil)
+    }
+
     func save() {
+        guard saveBlocked == nil else { return }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let snap = Snapshot(projects: projects, tasks: tasks, columns: columns, singleTimer: singleTimer,
+        var snap = Snapshot(projects: projects, tasks: tasks, columns: columns, singleTimer: singleTimer,
                             claudeModel: claudeModel, aiInstructions: aiInstructions, autoLogComment: autoLogComment,
                             awaySince: awaySince, agentQueueLimit: agentQueueLimit,
                             agentQueueSkipPermissions: agentQueueSkipPermissions,
@@ -447,6 +490,12 @@ final class AppStore {
                             overviewLayout: overviewLayout.isEmpty ? nil : overviewLayout,
                             codeReviewPrompt: codeReviewPrompt.isEmpty ? nil : codeReviewPrompt,
                             sessionRunner: sessionRunner, sessionAgent: sessionAgent)
+        // What changed since the last save gets the time of this one; what is gone, a deletion.
+        let records = snap.syncRecords()
+        syncMeta = SyncMerge.stamp(syncMeta, before: savedRecords, after: records)
+        savedRecords = records
+        snap.schema = SyncSchema.current
+        snap.sync = syncMeta
         if let data = try? encoder.encode(snap) {
             try? data.write(to: Self.dataURL, options: .atomic)
         }
@@ -778,9 +827,10 @@ final class AppStore {
         if tile.badgeLabel != label { tile.badgeLabel = label }
     }
 
-    private func closeEntries(at i: Int) {
+    /// `localOnly`: leave alone a timer another Mac started, which that Mac stops.
+    private func closeEntries(at i: Int, localOnly: Bool = false) {
         let end = Date()
-        for j in tasks[i].entries.indices where tasks[i].entries[j].end == nil {
+        for j in tasks[i].entries.indices where tasks[i].entries[j].end == nil && (!localOnly || tasks[i].entries[j].isLocal) {
             tasks[i].entries[j].end = end
         }
         // Discard accidental clicks (< 1s).
@@ -806,7 +856,7 @@ final class AppStore {
         if singleTimer {
             for k in tasks.indices where tasks[k].isRunning { closeEntries(at: k) }
         }
-        let entry = TimeEntry(start: Date())
+        let entry = TimeEntry(start: Date(), machine: Machine.id)
         tasks[i].entries.append(entry)
         // Starting work on a not-started or done task moves it to the In progress column, if there is one.
         let current = role(of: tasks[i].status)
@@ -821,10 +871,11 @@ final class AppStore {
             : BackdateOffer(taskId: tasks[i].id, entryId: entry.id, options: earlier, made: Date())
     }
 
+    /// This Mac's timers: quitting here, or "Stop All" here, does not stop work on another Mac.
     func stopAll() {
         var changed = false
-        for i in tasks.indices where tasks[i].isRunning {
-            closeEntries(at: i)
+        for i in tasks.indices where tasks[i].entries.contains(where: { $0.end == nil && $0.isLocal }) {
+            closeEntries(at: i, localOnly: true)
             changed = true
         }
         if changed { save() }

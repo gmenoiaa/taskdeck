@@ -43,6 +43,17 @@ Redmine, Jira, GitHub or Claude API call succeeded unless it actually ran.
 - Persistence: `~/Library/Application Support/TaskDeck/data.json` via `AppStore.Snapshot`. Every
   new persisted field is **optional in `Snapshot`** with a default, so old files still load, and
   must be added to both `load()` and `save()`.
+- Records sync between Macs one by one (`Sync.swift`, `SyncRecords.swift`): tasks, spaces, goals,
+  standup notes, columns and `SyncedSettings`. A new field is synced unless it names something on
+  one Mac (a path, a Claude home, a runner, a browser, a session): then add it to `synced` and
+  `keepingMachineFields` there, and keep it out of `SyncedSettings`. Raise `SyncSchema.current`
+  whenever a saved field is added or changes meaning: a build never saves over a file from a newer
+  version, and merging refuses copies of another version.
+- Save stamps each synced record that changed since the last save (`SyncMerge.stamp`), so code
+  that edits data needs no stamping of its own; it only has to call `save()`.
+- A running timer belongs to the Mac that started it (`TimeEntry.machine`): stopping all, quitting
+  and the away cut-off touch only this Mac's.
+- `swift test` runs the tests in `Tests/TaskDeckTests`.
 - The user sees "spaces"; in code and in `data.json` a space is still a `Project` (`projects`,
   `projectId`). Keep the old names in code so existing files load, and write "space" in UI text.
 - A task's pull requests are saved on it (`TaskItem.pullRequests`). `recordPullRequests` adds what
